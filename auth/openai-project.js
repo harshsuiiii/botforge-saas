@@ -26,8 +26,8 @@
  * is available to organisation owners and requires an org-scoped key.
  */
 
-const crypto = require('crypto');
 const pool   = require('./db');   // shared pg Pool from auth/db.js
+const { decryptToken, getOwnerToken } = require('./token-crypto');
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -44,63 +44,8 @@ const MANAGEMENT_ENDPOINTS = {
 };
 
 const DEFAULT_MODEL    = 'gpt-4o-mini';
-const ENCRYPTION_ALGO  = 'aes-256-gcm';
-
-// ─── Crypto helpers ───────────────────────────────────────────────────────────
-
-/**
- * Derive a 32-byte Buffer from the hex env var TOKEN_ENCRYPTION_KEY.
- * Throws at call time rather than at module load so the error is traceable.
- */
-function getEncryptionKey() {
-  const hexKey = process.env.TOKEN_ENCRYPTION_KEY;
-  if (!hexKey || hexKey.length !== 64) {
-    throw new Error(
-      'TOKEN_ENCRYPTION_KEY must be a 64-character hex string (32 bytes).',
-    );
-  }
-  return Buffer.from(hexKey, 'hex');
-}
-
-/**
- * Decrypt an AES-256-GCM ciphertext stored in the openai_tokens table.
- *
- * @param {Buffer} encryptedToken – ciphertext || auth-tag (last 16 bytes are the tag)
- * @param {Buffer} iv             – 12-byte initialisation vector
- * @returns {string}              – plaintext OpenAI API key
- */
-function decryptToken(encryptedToken, iv) {
-  const key     = getEncryptionKey();
-  // Last 16 bytes of the stored blob are the GCM auth tag
-  const authTag  = encryptedToken.slice(-16);
-  const ciphertext = encryptedToken.slice(0, -16);
-
-  const decipher = crypto.createDecipheriv(ENCRYPTION_ALGO, key, iv);
-  decipher.setAuthTag(authTag);
-
-  const plain = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-  return plain.toString('utf8');
-}
 
 // ─── DB helpers ───────────────────────────────────────────────────────────────
-
-/**
- * Fetch the encrypted OpenAI token for a user from the DB.
- *
- * @param {string} userId – UUID
- * @returns {{ encrypted_token: Buffer, iv: Buffer } | null}
- */
-async function getEncryptedToken(userId) {
-  const { rows } = await pool.query(
-    `SELECT encrypted_token, iv
-     FROM   openai_tokens
-     WHERE  user_id = $1
-     ORDER  BY updated_at DESC
-     LIMIT  1`,
-    [userId],
-  );
-  return rows[0] ?? null;
-}
 
 /**
  * Fetch a bot's current configuration (name, spend_cap, user_id).
@@ -297,28 +242,24 @@ async function provisionOpenAIProject(botId) {
   }
 
   // ── Step 2: decrypt token ─────────────────────────────────
-  const tokenRow = await getEncryptedToken(bot.user_id);
-  if (!tokenRow) {
-    return {
-      success   : false,
-      project_id: null,
-      warnings,
-      error     : 'No OpenAI token found for this user. Connect OpenAI OAuth first.',
-    };
-  }
-
   let openaiToken;
   try {
-    openaiToken = decryptToken(
-      tokenRow.encrypted_token,
-      tokenRow.iv,
-    );
+    openaiToken = await getOwnerToken(bot.user_id);
   } catch (err) {
     return {
       success   : false,
       project_id: null,
       warnings,
       error     : `Token decryption failed: ${err.message}`,
+    };
+  }
+
+  if (!openaiToken) {
+    return {
+      success   : false,
+      project_id: null,
+      warnings,
+      error     : 'No OpenAI token found for this user. Connect OpenAI OAuth first.',
     };
   }
 

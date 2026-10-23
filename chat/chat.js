@@ -44,13 +44,13 @@ const crypto  = require('crypto');
 const { v4: uuidv4 } = require('uuid');
 
 const pool = require('../auth/db');
+const { getOwnerToken } = require('../auth/token-crypto');
 
 const router = express.Router();
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const OPENAI_CHAT_URL  = 'https://api.openai.com/v1/chat/completions';
-const ENCRYPTION_ALGO  = 'aes-256-gcm';
 const REFUSAL_MESSAGE  =
   "I'm sorry, but I'm not able to discuss that topic. " +
   'Is there something else I can help you with?';
@@ -73,38 +73,6 @@ router.use((req, res, next) => {
   }
   next();
 });
-
-// ─── Crypto helpers ───────────────────────────────────────────────────────────
-
-/**
- * Return the 32-byte AES key from TOKEN_ENCRYPTION_KEY env var.
- */
-function getEncryptionKey() {
-  const hexKey = process.env.TOKEN_ENCRYPTION_KEY;
-  if (!hexKey || hexKey.length !== 64) {
-    throw new Error('TOKEN_ENCRYPTION_KEY must be a 64-character hex string.');
-  }
-  return Buffer.from(hexKey, 'hex');
-}
-
-/**
- * Decrypt an AES-256-GCM ciphertext stored in openai_tokens.
- * Convention: last 16 bytes of encryptedToken Buffer are the GCM auth tag.
- *
- * @param {Buffer} encryptedToken
- * @param {Buffer} iv
- * @returns {string} plaintext API key
- */
-function decryptToken(encryptedToken, iv) {
-  const key        = getEncryptionKey();
-  const authTag    = encryptedToken.slice(-16);
-  const ciphertext = encryptedToken.slice(0, -16);
-
-  const decipher = crypto.createDecipheriv(ENCRYPTION_ALGO, key, iv);
-  decipher.setAuthTag(authTag);
-
-  return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
-}
 
 // ─── Fingerprint ──────────────────────────────────────────────────────────────
 
@@ -195,24 +163,6 @@ async function resolveBotByEmbedKey(embedKey) {
      JOIN   bots b ON b.id = ec.bot_id
      WHERE  ec.embed_key = $1`,
     [embedKey],
-  );
-  return rows[0] ?? null;
-}
-
-/**
- * Fetch the encrypted OpenAI token for a user.
- *
- * @param {string} userId
- * @returns {Promise<{encrypted_token: Buffer, iv: Buffer}|null>}
- */
-async function getEncryptedToken(userId) {
-  const { rows } = await pool.query(
-    `SELECT encrypted_token, iv
-     FROM   openai_tokens
-     WHERE  user_id = $1
-     ORDER  BY updated_at DESC
-     LIMIT  1`,
-    [userId],
   );
   return rows[0] ?? null;
 }
@@ -446,11 +396,10 @@ router.post('/', async (req, res) => {
   // ── Step 4: decrypt OpenAI token ────────────────────────────────────────────
   let openaiToken;
   try {
-    const tokenRow = await getEncryptedToken(bot.user_id);
-    if (!tokenRow) {
+    openaiToken = await getOwnerToken(bot.user_id);
+    if (!openaiToken) {
       return res.status(503).json({ error: 'Bot is not connected to OpenAI.' });
     }
-    openaiToken = decryptToken(tokenRow.encrypted_token, tokenRow.iv);
   } catch (err) {
     console.error('[chat] Token decryption error:', err.message);
     return res.status(500).json({ error: 'Internal server error.' });

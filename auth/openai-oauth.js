@@ -10,36 +10,15 @@
  *   POST /auth/openai/spend-cap – persist default monthly spend cap on user
  */
 
-const crypto  = require('crypto');
 const express = require('express');
 const pool    = require('./db');
 const { authMiddleware } = require('./middleware');
+const { encryptToken }   = require('./token-crypto');
 
 const router = express.Router();
 
-const ENCRYPTION_ALGO = 'aes-256-gcm';
 const OPENAI_AUTH_URL   = 'https://auth.openai.com/oauth/authorize';
 const OPENAI_TOKEN_URL  = 'https://auth.openai.com/oauth/token';
-
-function getEncryptionKey() {
-  const hexKey = process.env.TOKEN_ENCRYPTION_KEY;
-  if (!hexKey || hexKey.length !== 64) {
-    throw new Error('TOKEN_ENCRYPTION_KEY must be a 64-character hex string.');
-  }
-  return Buffer.from(hexKey, 'hex');
-}
-
-function encryptToken(plaintext) {
-  const key = getEncryptionKey();
-  const iv  = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv(ENCRYPTION_ALGO, key, iv);
-  const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
-  const authTag = cipher.getAuthTag();
-  return {
-    encrypted_token: Buffer.concat([encrypted, authTag]),
-    iv,
-  };
-}
 
 function buildAuthorizeUrl(state) {
   const params = new URLSearchParams({

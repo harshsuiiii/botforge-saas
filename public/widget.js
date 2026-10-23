@@ -15,8 +15,6 @@
 
   // ─── Configuration ──────────────────────────────────────────────────────────
 
-  const API_BASE    = 'https://botforge.io';
-  const CHAT_URL    = `${API_BASE}/chat`;
   const BOT_NAME    = 'BotForge Assistant';  // default; overridden by server first-msg metadata
   const SESSION_KEY = 'bf_session_id';
 
@@ -33,6 +31,23 @@
     console.warn('[BotForge] No data-bot attribute found on widget script tag.');
     return;
   }
+
+  /**
+   * The API lives on the same server that serves widget.js, so derive it from
+   * the script's own src. An explicit data-api attribute overrides this.
+   */
+  function resolveApiBase() {
+    const override = scriptTag?.getAttribute('data-api');
+    if (override) return override.replace(/\/+$/, '');
+    try {
+      return new URL(scriptTag.src).origin;
+    } catch {
+      return window.location.origin;
+    }
+  }
+
+  const API_BASE = resolveApiBase();
+  const CHAT_URL = `${API_BASE}/chat`;
 
   // ─── Session ID ─────────────────────────────────────────────────────────────
 

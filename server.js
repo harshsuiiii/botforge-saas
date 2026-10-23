@@ -17,6 +17,10 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 
+// Mounted before the dashboard CORS middleware below: the widget calls /chat
+// from customer origins, and the chat router answers its own preflights.
+app.use('/chat', chatRouter);
+
 app.use((req, res, next) => {
   const origin = process.env.FRONTEND_URL || 'http://localhost:5173';
   res.setHeader('Access-Control-Allow-Origin', origin);
@@ -38,7 +42,6 @@ app.use('/auth', openaiOAuthRouter);
 app.use('/openai', openaiRouter);
 app.use('/api/bots', botsRouter);
 app.use('/api/analytics', analyticsRouter);
-app.use('/chat', chatRouter);
 app.use(express.static('public'));
 
 app.use((err, _req, res, _next) => {

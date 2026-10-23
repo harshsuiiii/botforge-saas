@@ -542,26 +542,29 @@ router.get(
 
     // ── SQL: top detected topics (all sessions) ────────────────────────────
     //
-    //   SELECT topic, COUNT(*) AS count
+    //   SELECT t.topic, COUNT(*) AS count
     //   FROM sessions s
+    //   CROSS JOIN LATERAL unnest(s.topics_detected) AS t(topic)
     //   JOIN bots b ON b.id = s.bot_id
-    //   , unnest(s.topics_detected) AS topic       ← implicit CROSS JOIN LATERAL
     //   WHERE b.user_id = $1 AND b.deleted_at IS NULL
     //     AND s.started_at >= NOW() - $2::INTERVAL
     //     [AND s.bot_id = $3]
-    //     AND topic <> ''
-    //   GROUP BY topic
+    //     AND t.topic <> ''
+    //   GROUP BY t.topic
     //   ORDER BY count DESC
     //   LIMIT 10
     //
+    // The lateral unnest must sit in the FROM list before whereClause, because
+    // whereClause carries both the bots JOIN and the WHERE keyword.
+    //
     const detectedSQL = `
-      SELECT topic,
+      SELECT t.topic,
              COUNT(*) AS count
       FROM sessions s
+      CROSS JOIN LATERAL unnest(s.topics_detected) AS t(topic)
       ${whereClause}
-      , unnest(s.topics_detected) AS topic
-      WHERE topic <> ''
-      GROUP BY topic
+        AND t.topic <> ''
+      GROUP BY t.topic
       ORDER BY count DESC
       LIMIT 10
     `;
@@ -571,50 +574,31 @@ router.get(
     // Same shape but additionally filters WHERE s.blocked = true.
     // This reveals which block-list keywords are being hit most often.
     //
-    //   SELECT topic, COUNT(*) AS count
+    //   SELECT t.topic, COUNT(*) AS count
     //   FROM sessions s
+    //   CROSS JOIN LATERAL unnest(s.topics_detected) AS t(topic)
     //   JOIN bots b ON b.id = s.bot_id
-    //   , unnest(s.topics_detected) AS topic
     //   WHERE b.user_id = $1 AND b.deleted_at IS NULL
     //     AND s.started_at >= NOW() - $2::INTERVAL
     //     [AND s.bot_id = $3]
     //     AND s.blocked = true
-    //     AND topic <> ''
-    //   GROUP BY topic
-    //   ORDER BY count DESC
-    //   LIMIT 10
-    //
-    // NOTE: whereClause already contains the WHERE keyword for the JOIN condition,
-    // but for the unnest lateral we need to append the extra filter as AND.
-    // We reconstruct the query using the same params array.
-    //
-    const blockedSQL = `
-      SELECT topic,
-             COUNT(*) AS count
-      FROM sessions s
-      ${whereClause}
-        AND s.blocked = true
-      , unnest(s.topics_detected) AS topic
-      WHERE topic <> ''
-      GROUP BY topic
-      ORDER BY count DESC
-      LIMIT 10
-    `;
-
-    // ── Alternative SQL using explicit CROSS JOIN LATERAL (Postgres 9.3+) ──
-    //
-    // If the implicit comma-style unnest above causes query planner issues,
-    // use this explicit form instead:
-    //
-    //   SELECT t.topic, COUNT(*) AS count
-    //   FROM sessions s
-    //   JOIN bots b ON b.id = s.bot_id
-    //   CROSS JOIN LATERAL unnest(s.topics_detected) AS t(topic)
-    //   WHERE b.user_id = $1 AND ...
     //     AND t.topic <> ''
     //   GROUP BY t.topic
     //   ORDER BY count DESC
     //   LIMIT 10
+    //
+    const blockedSQL = `
+      SELECT t.topic,
+             COUNT(*) AS count
+      FROM sessions s
+      CROSS JOIN LATERAL unnest(s.topics_detected) AS t(topic)
+      ${whereClause}
+        AND s.blocked = true
+        AND t.topic <> ''
+      GROUP BY t.topic
+      ORDER BY count DESC
+      LIMIT 10
+    `;
 
     try {
       const [detectedResult, blockedResult] = await Promise.all([

@@ -12,16 +12,23 @@
 
 const dns = require('dns');
 const net = require('net');
+const { Agent, fetch: undiciFetch } = require('undici');
 
 const blockList = new net.BlockList();
 blockList.addSubnet('0.0.0.0', 8, 'ipv4');
 blockList.addSubnet('10.0.0.0', 8, 'ipv4');
+blockList.addSubnet('100.64.0.0', 10, 'ipv4');    // carrier-grade NAT, incl. Alibaba Cloud metadata
 blockList.addSubnet('127.0.0.0', 8, 'ipv4');
 blockList.addSubnet('169.254.0.0', 16, 'ipv4');   // link-local, incl. cloud metadata
 blockList.addSubnet('172.16.0.0', 12, 'ipv4');
+blockList.addSubnet('192.0.0.0', 24, 'ipv4');     // IETF protocol assignments
 blockList.addSubnet('192.168.0.0', 16, 'ipv4');
-blockList.addAddress('::', 'ipv6');
-blockList.addAddress('::1', 'ipv6');
+blockList.addSubnet('198.18.0.0', 15, 'ipv4');    // benchmarking
+blockList.addSubnet('224.0.0.0', 4, 'ipv4');      // multicast
+blockList.addSubnet('240.0.0.0', 4, 'ipv4');      // reserved, incl. broadcast
+blockList.addSubnet('::', 96, 'ipv6');            // unspecified, loopback, IPv4-compatible
+blockList.addSubnet('64:ff9b::', 96, 'ipv6');     // NAT64 (can reach IPv4 internals via DNS64)
+blockList.addSubnet('2002::', 16, 'ipv6');        // 6to4 (embeds an IPv4 address)
 blockList.addSubnet('fc00::', 7, 'ipv6');          // unique local
 blockList.addSubnet('fe80::', 10, 'ipv6');         // link-local
 
@@ -98,4 +105,34 @@ async function assertPublicUrl(url, { lookup = dns.promises.lookup } = {}) {
   return parsed;
 }
 
-module.exports = { isBlockedAddress, assertPublicUrl };
+/**
+ * A net.connect-compatible lookup that refuses blocked addresses. Used at
+ * connection time so a DNS answer that changes after assertPublicUrl
+ * (DNS rebinding) still cannot reach a private address.
+ *
+ * @param {Function} lookup – dns.lookup-compatible (injectable for tests)
+ */
+function makeGuardedLookup(lookup = dns.lookup) {
+  return (hostname, options, callback) => {
+    const opts = typeof options === 'object' && options !== null ? options : {};
+    lookup(hostname, { ...opts, all: true }, (err, addresses) => {
+      if (err) return callback(err);
+      const list = Array.isArray(addresses) ? addresses : [{ address: addresses, family: opts.family }];
+      if (!list.length || list.some((a) => isBlockedAddress(a.address))) {
+        return callback(guardError('URL_BLOCKED', 'URL points to a private or local address.'));
+      }
+      if (opts.all) return callback(null, list);
+      return callback(null, list[0].address, list[0].family);
+    });
+  };
+}
+
+let guardedAgent;
+
+/** fetch() whose connections re-validate every resolved address. */
+function guardedFetch(url, init = {}) {
+  guardedAgent ??= new Agent({ connect: { lookup: makeGuardedLookup() } });
+  return undiciFetch(url, { ...init, dispatcher: guardedAgent });
+}
+
+module.exports = { isBlockedAddress, assertPublicUrl, makeGuardedLookup, guardedFetch };

@@ -28,11 +28,11 @@ async function seedCatalogBot({ answer_mode = 'flexible', status = 'ready' } = {
 }
 
 /** POST /chat and parse the SSE body into events (objects, or the string '[DONE]'). */
-async function chat(embedKey, message) {
+async function chat(embedKey, message, sessionId = null) {
   const res = await fetch(`${app.base}/chat`, {
     method : 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body   : JSON.stringify({ embed_key: embedKey, message }),
+    body   : JSON.stringify({ embed_key: embedKey, message, session_id: sessionId }),
   });
   assert.equal(res.status, 200);
   const body = await res.text();
@@ -134,8 +134,58 @@ test('truncates descriptions in tool results to 300 chars', async () => {
   );
 });
 
-test('sends no tools when the bot has no ready catalog', async () => {
-  const { embedKey } = await seedCatalogBot({ status: 'failed' });
+test('keeps the catalog on while a re-sync has failed', async () => {
+  const { embedKey } = await seedCatalogBot({ status: 'failed' }); // products from an earlier import remain
+  stub.queueChat({ sse: [...sse.text('Hello!'), sse.finish()] });
+
+  await chat(embedKey, 'hi');
+
+  const [req] = chatRequests();
+  assert.ok(Array.isArray(req.body.tools));
+  assert.ok(req.body.messages[0].content.includes('Prices and stock in tool results are authoritative.'));
+});
+
+test('keeps product_ids and timestamps of earlier turns', async () => {
+  const { embedKey, botId } = await seedCatalogBot();
+  stub.queueChat({ sse: sse.toolCall(0, 'call_1', 'search_products', '{"query":"waterproof rain jacket"}') });
+  stub.queueChat({ sse: [...sse.text('The rain jacket.'), sse.finish()] });
+  const first = await chat(embedKey, 'rain jacket?');
+  const sessionId = first[0].session_id;
+
+  const savedTurn = async (n) => waitFor(async () => {
+    const { rows } = await pool.query('SELECT messages FROM sessions WHERE session_id = $1', [sessionId]);
+    return rows[0]?.messages.length === n ? rows[0].messages : null;
+  }, `${n} messages`);
+  const afterFirst = await savedTurn(2);
+
+  stub.queueChat({ sse: [...sse.text('You are welcome.'), sse.finish()] });
+  await chat(embedKey, 'thanks', sessionId);
+  const afterSecond = await savedTurn(4);
+
+  assert.deepEqual(afterSecond[1].product_ids, afterFirst[1].product_ids);
+  assert.ok(afterSecond[1].product_ids.length > 0);
+  assert.equal(afterSecond[0].ts, afterFirst[0].ts);
+  assert.ok(!chatRequests().at(-1).body.messages.some((m) => 'product_ids' in m || 'ts' in m));
+  assert.ok(botId);
+});
+
+test('a strict fallback reply sends no product cards', async () => {
+  const { embedKey, botId } = await seedCatalogBot({ answer_mode: 'strict' });
+  stub.queueChat({ sse: sse.toolCall(0, 'call_1', 'search_products', '{"query":"jacket"}') });
+  stub.queueChat({ sse: [...sse.text(FALLBACK), sse.finish()] });
+
+  const events = await chat(embedKey, 'Do you have a ski jacket?');
+
+  assert.ok(!events.some((e) => e.products));
+  const session = await waitFor(async () => {
+    const { rows } = await pool.query('SELECT messages FROM sessions WHERE bot_id = $1', [botId]);
+    return rows[0];
+  }, 'session');
+  assert.ok(!('product_ids' in session.messages.find((m) => m.role === 'assistant')));
+});
+
+test('sends no tools when the bot has no catalog data', async () => {
+  const { embedKey } = await seedBot(pool);
   stub.queueChat({ sse: [...sse.text('Hello!'), sse.finish()] });
 
   const events = await chat(embedKey, 'hi');

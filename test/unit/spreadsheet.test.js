@@ -39,6 +39,16 @@ test('maps the remaining aliases', async () => {
   });
 });
 
+test('maps headers with a bracketed unit or currency', async () => {
+  const { products } = await parseSpreadsheet(
+    csv('Product Name,Price (₹),Stock (qty),Weight (kg)\nRain Jacket,"₹1,299/-",4,0.8\n'),
+    'c.csv',
+  );
+  assert.equal(products[0].price, 1299);
+  assert.equal(products[0].in_stock, true);
+  assert.deepEqual(products[0].attributes, { 'weight (kg)': '0.8' });
+});
+
 test('counts skipped rows without a name', async () => {
   const { products, skipped } = await parseSpreadsheet(csv('name,price\n,10\nCap,20\n'), 'c.csv');
   assert.equal(skipped, 1);

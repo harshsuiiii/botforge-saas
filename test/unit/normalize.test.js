@@ -17,6 +17,15 @@ test('parses rupee and lakh formats', () => {
   assert.equal(parsePrice(null), null);
 });
 
+test('parses "/-", unspaced and MRP-prefixed rupee prices', () => {
+  assert.equal(parsePrice('₹1,299/-'), 1299);
+  assert.equal(parsePrice('Rs.1,299/-'), 1299);
+  assert.equal(parsePrice('INR2,999'), 2999);
+  assert.equal(parsePrice('MRP ₹999'), 999);
+  assert.equal(parsePrice('MRP: Rs 1,499'), 1499);
+  assert.equal(parsePrice('2,999 INR'), 2999);
+});
+
 test('parses stock values', () => {
   assert.equal(parseStock('5'), true);
   assert.equal(parseStock(0), false);

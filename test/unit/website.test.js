@@ -48,6 +48,15 @@ test.before(async () => {
       res.writeHead(302, { location: 'http://blocked.test/' });
       return res.end();
     }
+    if (url.pathname === '/bare') {
+      // like shop.com → www.shop.com: same site, different hostname
+      res.writeHead(301, { location: `http://localhost:${server.address().port}/home` });
+      return res.end();
+    }
+    if (url.pathname === '/home') {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      return res.end(page('<p>Home</p><a href="/a">A</a>'));
+    }
     const loop = /^\/loop(\d+)$/.exec(url.pathname);
     if (loop) {
       res.writeHead(302, { location: `/loop${Number(loop[1]) + 1}` });
@@ -65,6 +74,12 @@ test.before(async () => {
 test.after(() => new Promise((r) => server.close(r)));
 
 test.beforeEach(() => { guardCalls = []; fetched = []; });
+
+test('follows the site after the start URL redirects to another hostname', async () => {
+  const pages = await crawlSite(`${base}/bare`, { guard, fetchImpl, maxDepth: 1 });
+  assert.deepEqual(pages.map((p) => new URL(p.url).pathname).sort(), ['/a', '/home']);
+  assert.ok(pages.every((p) => new URL(p.url).hostname === 'localhost'));
+});
 
 test('crawls same-host links up to maxDepth', async () => {
   const pages = await crawlSite(`${base}/`, { guard, fetchImpl, maxDepth: 2 });

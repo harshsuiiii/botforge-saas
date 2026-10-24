@@ -45,13 +45,18 @@ function normalizeHeader(header) {
   return String(header ?? '').replace(/^﻿/, '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
+/** 'price (₹)' → 'price', 'stock [qty]' → 'stock' for alias lookup. */
+function stripUnitSuffix(key) {
+  return key.replace(/\s*[([].*?[)\]]\s*$/, '');
+}
+
 /** Map one row ({ header: value }) onto the raw product shape. */
 function rowToRaw(row) {
   const raw = { attributes: {} };
   for (const [header, value] of Object.entries(row)) {
     const key = normalizeHeader(header);
     if (!key) continue;
-    const field = HEADER_ALIASES[key];
+    const field = HEADER_ALIASES[key] ?? HEADER_ALIASES[stripUnitSuffix(key)];
     if (field) raw[field] = value;
     else raw.attributes[key] = value;
   }

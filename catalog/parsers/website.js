@@ -11,7 +11,7 @@
  */
 
 const cheerio = require('cheerio');
-const { assertPublicUrl } = require('../url-guard');
+const { assertPublicUrl, guardedFetch } = require('../url-guard');
 
 const USER_AGENT = 'BotForgeCatalogBot/1.0';
 
@@ -90,7 +90,7 @@ async function fetchPage(url, { guard, fetchImpl, timeoutMs, maxBytes, maxRedire
 async function crawlSite(startUrl, opts = {}) {
   const options = {
     guard       : assertPublicUrl,
-    fetchImpl   : fetch,
+    fetchImpl   : guardedFetch,   // re-checks DNS at connect time (rebinding)
     maxPages    : 50,
     maxDepth    : 2,
     timeoutMs   : 10000,
@@ -102,7 +102,7 @@ async function crawlSite(startUrl, opts = {}) {
   // A blocked or invalid start URL is an error the owner should see.
   await options.guard(startUrl);
 
-  const host  = new URL(startUrl).hostname;
+  let host    = new URL(startUrl).hostname;
   const start = stripHash(startUrl);
   const seen  = new Set([start]);
   const queue = [{ url: start, depth: 0 }];
@@ -120,6 +120,9 @@ async function crawlSite(startUrl, opts = {}) {
       fetched = null; // guard rejection, timeout or network error: skip this page
     }
     if (!fetched) continue;
+
+    // shop.com → www.shop.com is the same site: crawl the host the start URL landed on
+    if (attempts === 1) host = new URL(fetched.url).hostname;
 
     seen.add(stripHash(fetched.url));
     const $ = cheerio.load(fetched.html);

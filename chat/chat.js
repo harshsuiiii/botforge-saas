@@ -172,10 +172,10 @@ async function resolveBotByEmbedKey(embedKey) {
             b.deleted_at,
             b.answer_mode,
             b.fallback_message,
-            EXISTS (
-              SELECT 1 FROM catalog_sources cs
-              WHERE cs.bot_id = b.id AND cs.status = 'ready'
-            ) AS has_catalog,
+            -- Stored catalog data, not source status: a running or failed
+            -- re-sync keeps the previous import's rows, so chat keeps using them.
+            (EXISTS (SELECT 1 FROM catalog_products cp WHERE cp.bot_id = b.id)
+             OR EXISTS (SELECT 1 FROM catalog_info ci WHERE ci.bot_id = b.id)) AS has_catalog,
             ec.domain_allowlist
      FROM   embed_configs ec
      JOIN   bots b ON b.id = ec.bot_id
@@ -186,12 +186,13 @@ async function resolveBotByEmbedKey(embedKey) {
 }
 
 /**
- * Load conversation history from an existing session.
+ * Load the stored messages of an existing session, unchanged
+ * ({role, content, ts, product_ids?}) so they can be persisted again as-is.
  * Returns [] if no session found with the given id + bot_id pair.
  *
  * @param {string} sessionId
  * @param {string} botId
- * @returns {Promise<Array<{role:string, content:string}>>}
+ * @returns {Promise<Array<{role:string, content:string, ts?:string, product_ids?:string[]}>>}
  */
 async function loadSessionHistory(sessionId, botId) {
   const { rows } = await pool.query(
@@ -200,10 +201,7 @@ async function loadSessionHistory(sessionId, botId) {
   );
 
   if (!rows.length) return [];
-
-  // messages is stored as JSONB: [{role, content, ts}, ...]
-  // Strip `ts` so OpenAI only sees {role, content}
-  return (rows[0].messages ?? []).map(({ role, content }) => ({ role, content }));
+  return rows[0].messages ?? [];
 }
 
 /**
@@ -454,13 +452,15 @@ router.post('/', async (req, res) => {
     : uuidv4();
 
   // ── Step 2: load existing session history ───────────────────────────────────
-  let history = [];
+  let storedMessages = [];
   try {
-    history = await loadSessionHistory(sessionId, bot.id);
+    storedMessages = await loadSessionHistory(sessionId, bot.id);
   } catch (err) {
     console.warn('[chat] Could not load session history:', err.message);
     // Non-fatal — proceed without history
   }
+  // OpenAI only sees {role, content}; stored messages keep ts and product_ids
+  const history = storedMessages.map(({ role, content }) => ({ role, content }));
 
   // ── Step 3: topic detection ─────────────────────────────────────────────────
   const detectedAllowed = detectTopics(userMessage, bot.topic_allow_list ?? []);
@@ -472,7 +472,7 @@ router.post('/', async (req, res) => {
   if (isBlocked) {
     // Persist blocked session turn before responding
     const blockedMessages = [
-      ...history.map((m) => ({ ...m, ts: new Date().toISOString() })),
+      ...storedMessages,
       { role: 'user',      content: userMessage,    ts: new Date().toISOString() },
       { role: 'assistant', content: REFUSAL_MESSAGE, ts: new Date().toISOString() },
     ];
@@ -587,7 +587,11 @@ router.post('/', async (req, res) => {
     sseWrite(res, { delta: STREAM_ERROR_TEXT });
   }
 
-  const productCards = [...cards.values()].slice(0, MAX_PRODUCT_CARDS);
+  // A strict "not in our catalog" reply must not show loosely matching products
+  const fallback = bot.fallback_message || DEFAULT_FALLBACK_MESSAGE;
+  const isStrictFallback = useCatalog && bot.answer_mode === 'strict' && assistantReply.includes(fallback);
+
+  const productCards = isStrictFallback ? [] : [...cards.values()].slice(0, MAX_PRODUCT_CARDS);
   if (productCards.length) sseWrite(res, { products: productCards });
 
   // Send terminal event
@@ -596,10 +600,9 @@ router.post('/', async (req, res) => {
 
   // ── Step 8: log unanswered questions, upsert session after stream ends ──────
   if (useCatalog) {
-    const fallback = bot.fallback_message || DEFAULT_FALLBACK_MESSAGE;
     if (searchCounts.length && searchCounts.every((n) => n === 0)) {
       logUnanswered(bot.id, sessionId, userMessage, 'no_results');
-    } else if (bot.answer_mode === 'strict' && assistantReply.includes(fallback)) {
+    } else if (isStrictFallback) {
       logUnanswered(bot.id, sessionId, userMessage, 'fallback');
     }
   }
@@ -608,7 +611,7 @@ router.post('/', async (req, res) => {
   const assistantEntry = { role: 'assistant', content: assistantReply, ts: now };
   if (productCards.length) assistantEntry.product_ids = productCards.map((c) => c.id);
   const updatedMessages = [
-    ...history.map((m) => ({ ...m, ts: m.ts ?? now })),
+    ...storedMessages,
     { role: 'user', content: userMessage, ts: now },
     assistantEntry,
   ];

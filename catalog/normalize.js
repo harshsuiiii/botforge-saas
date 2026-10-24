@@ -35,7 +35,8 @@ function parsePrice(value) {
   if (!s) return null;
 
   const stripped = s
-    .replace(/₹|\brs\.?|\binr\b|\busd\b|\$|€|£/gi, '')
+    .replace(/\/-\s*$/, '')                               // '₹1,299/-'
+    .replace(/₹|\$|€|£|mrp|rs\.?|inr|usd|:/gi, '')        // 'MRP ₹999', 'INR2,999'
     .replace(/[,\s]/g, '');
   if (!/^\d+(\.\d+)?$/.test(stripped)) return null;
   return Number(stripped);

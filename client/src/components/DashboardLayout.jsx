@@ -5,6 +5,7 @@ const NAV = [
   { to: '/dashboard', label: 'Overview', end: true },
   { to: '/dashboard/logs', label: 'Chat Logs' },
   { to: '/dashboard/topics', label: 'Topics' },
+  { to: '/dashboard/catalog', label: 'Catalog' },
   { to: '/dashboard/settings', label: 'Settings' },
 ];
 

@@ -9,7 +9,8 @@ export function useApi() {
 
   const apiFetch = useCallback(async (path, options = {}) => {
     const headers = {
-      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+      // FormData bodies need the browser-generated multipart boundary header
+      ...(options.body && !(options.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...options.headers,
     };

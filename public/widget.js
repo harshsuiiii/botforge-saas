@@ -17,6 +17,33 @@
 
   const BOT_NAME    = 'BotForge Assistant';  // default; overridden by server first-msg metadata
   const SESSION_KEY = 'bf_session_id';
+  const MAX_CARDS   = 4;
+
+  // ─── Pure helpers (product cards) ───────────────────────────────────────────
+
+  /** Return the URL only if it is http(s); blocks javascript:, data: and junk. */
+  function safeHttpUrl(value) {
+    if (!value) return null;
+    try {
+      const url = new URL(String(value));
+      return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Locale currency formatting, falling back to "CODE amount" for bad codes. */
+  function formatPrice(price, currency) {
+    if (price === null || price === undefined) return '';
+    try {
+      return new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(price);
+    } catch {
+      return `${currency} ${price}`;
+    }
+  }
+
+  // Test hook: tests set window.__BF_TEST__ = true before loading the script.
+  if (window.__BF_TEST__ === true) window.__BF_TEST__ = { safeHttpUrl, formatPrice };
 
   /** Find THIS script tag to read data-* attributes. */
   const scriptTag = document.currentScript ||
@@ -435,6 +462,62 @@
       0%, 100% { opacity: 1; }
       50%       { opacity: 0; }
     }
+
+    /* ── Product cards ── */
+    .bf-cards {
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      padding: 2px 0 4px 32px;
+    }
+    .bf-cards::-webkit-scrollbar { height: 4px; }
+    .bf-cards::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
+    .bf-card {
+      flex: 0 0 140px;
+      width: 140px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding: 8px;
+      border-radius: 12px;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+    .bf-card-img {
+      width: 100%;
+      height: 88px;
+      object-fit: cover;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.04);
+    }
+    .bf-card-name {
+      font-size: 12px;
+      font-weight: 600;
+      color: #e5e7eb;
+      line-height: 1.35;
+      word-break: break-word;
+    }
+    .bf-card-price { font-size: 12px; color: #a5b4fc; }
+    .bf-card-badge {
+      align-self: flex-start;
+      font-size: 10px;
+      color: #fca5a5;
+      background: rgba(239,68,68,0.15);
+      border-radius: 6px;
+      padding: 1px 6px;
+    }
+    .bf-card-link {
+      margin-top: auto;
+      font-size: 12px;
+      font-weight: 600;
+      color: #fff;
+      text-align: center;
+      text-decoration: none;
+      padding: 5px 0;
+      border-radius: 8px;
+      background: linear-gradient(135deg, #6366f1, #7c3aed);
+    }
+    .bf-card-link:hover { opacity: 0.9; }
   `;
 
   // ─── SVG Icons ───────────────────────────────────────────────────────────────
@@ -603,6 +686,72 @@
     return bubbleEl;
   }
 
+  /**
+   * Insert up to MAX_CARDS product cards after a bot message row.
+   * Card data is untrusted: text goes through textContent only, and links /
+   * images are used only when they are http(s) URLs.
+   *
+   * @param {Array<{ name, price, currency, in_stock, url, image_url }>} products
+   * @param {HTMLElement} afterEl – the bot message row
+   */
+  function renderProductCards(products, afterEl) {
+    if (!products.length || !afterEl) return;
+
+    const row = document.createElement('div');
+    row.classList.add('bf-cards', 'bf-widget');
+
+    for (const product of products.slice(0, MAX_CARDS)) {
+      const card = document.createElement('div');
+      card.classList.add('bf-card');
+
+      const imageUrl = safeHttpUrl(product.image_url);
+      if (imageUrl) {
+        const img = document.createElement('img');
+        img.classList.add('bf-card-img');
+        img.src     = imageUrl;
+        img.alt     = '';
+        img.loading = 'lazy';
+        img.addEventListener('error', () => img.remove());
+        card.appendChild(img);
+      }
+
+      const name = document.createElement('div');
+      name.classList.add('bf-card-name');
+      name.textContent = product.name ?? '';
+      card.appendChild(name);
+
+      const priceText = formatPrice(product.price, product.currency);
+      if (priceText) {
+        const price = document.createElement('div');
+        price.classList.add('bf-card-price');
+        price.textContent = priceText;
+        card.appendChild(price);
+      }
+
+      if (product.in_stock === false) {
+        const badge = document.createElement('span');
+        badge.classList.add('bf-card-badge');
+        badge.textContent = 'Out of stock';
+        card.appendChild(badge);
+      }
+
+      const href = safeHttpUrl(product.url);
+      if (href) {
+        const link = document.createElement('a');
+        link.classList.add('bf-card-link');
+        link.href        = href;
+        link.target      = '_blank';
+        link.rel         = 'noopener noreferrer';
+        link.textContent = 'View';
+        card.appendChild(link);
+      }
+
+      row.appendChild(card);
+    }
+
+    afterEl.insertAdjacentElement('afterend', row);
+  }
+
   // ─── SSE Streaming ──────────────────────────────────────────────────────────
 
   /**
@@ -668,6 +817,13 @@
         // First event carries session_id
         if (parsed.session_id) {
           resolvedSessionId = parsed.session_id;
+          continue;
+        }
+
+        // Product cards for catalog matches (sent once, after the text)
+        if (Array.isArray(parsed.products)) {
+          renderProductCards(parsed.products, targetBubble.parentElement);
+          scrollToBottom(targetBubble.closest('#bf-messages'));
           continue;
         }
 

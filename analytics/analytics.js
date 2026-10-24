@@ -502,13 +502,40 @@ router.get(
         return res.status(404).json({ error: 'Session not found.' });
       }
 
-      return res.json({ session: rows[0] });
+      const session = rows[0];
+      session.products = await loadTranscriptProducts(session.bot_id, session.messages);
+      return res.json({ session });
     } catch (err) {
       console.error('[analytics] session transcript error:', err.message);
       return res.status(500).json({ error: 'Failed to load session transcript.' });
     }
   },
 );
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Product cards for every product_ids entry in a transcript that still
+ * exists in that bot's catalog.
+ *
+ * @returns {Promise<Object<string, { id, name, price, currency, in_stock, url, image_url }>>}
+ */
+async function loadTranscriptProducts(botId, messages) {
+  const ids = [...new Set((messages ?? []).flatMap((m) => m.product_ids ?? []))]
+    .filter((id) => typeof id === 'string' && UUID_RE.test(id));
+  if (!ids.length) return {};
+
+  const { rows } = await pool.query(
+    `SELECT id, name, price, currency, in_stock, url, image_url
+     FROM catalog_products
+     WHERE bot_id = $1 AND id = ANY($2::uuid[])`,
+    [botId, ids],
+  );
+  return Object.fromEntries(rows.map((p) => [
+    p.id,
+    { ...p, price: p.price === null ? null : Number(p.price) },
+  ]));
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ROUTE 4 – GET /api/analytics/topics
@@ -619,6 +646,100 @@ router.get(
     } catch (err) {
       console.error('[analytics] topics error:', err.message);
       return res.status(500).json({ error: 'Failed to load topic analytics.' });
+    }
+  },
+);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ROUTE 5 – GET /api/analytics/unanswered
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** SQL expression grouping questions that differ only in case and spacing. */
+const normalizedQuestion = (col) => `lower(regexp_replace(trim(${col}), '\\s+', ' ', 'g'))`;
+
+/**
+ * GET /api/analytics/unanswered?bot_id=&range=7|30|90
+ *
+ * Returns:
+ *  { questions: [{ question, count, last_asked, ids }] }   // top 50, unresolved only
+ */
+router.get(
+  '/unanswered',
+  [
+    qv('bot_id').optional().isUUID(),
+    qv('range').optional().isIn(['7', '30', '90']),
+  ],
+  rejectInvalid,
+  async (req, res) => {
+    const params = [req.user.sub, rangeToInterval(req.query.range)];
+    let botFilter = '';
+    if (req.query.bot_id) {
+      params.push(req.query.bot_id);
+      botFilter = `AND q.bot_id = $${params.length}`;
+    }
+
+    try {
+      const { rows } = await pool.query(
+        `WITH open_questions AS (
+           SELECT q.id, q.question, q.created_at, ${normalizedQuestion('q.question')} AS norm
+           FROM unanswered_questions q
+           JOIN bots b ON b.id = q.bot_id
+           WHERE b.user_id = $1
+             AND b.deleted_at IS NULL
+             AND q.resolved_at IS NULL
+             AND q.created_at >= NOW() - $2::INTERVAL
+             ${botFilter}
+         )
+         SELECT (array_agg(question ORDER BY created_at DESC))[1] AS question,
+                COUNT(*)::int                                     AS count,
+                MAX(created_at)                                   AS last_asked,
+                array_agg(id::text ORDER BY created_at DESC)      AS ids
+         FROM open_questions
+         GROUP BY norm
+         ORDER BY count DESC, last_asked DESC
+         LIMIT 50`,
+        params,
+      );
+      return res.json({ questions: rows });
+    } catch (err) {
+      console.error('[analytics] unanswered error:', err.message);
+      return res.status(500).json({ error: 'Failed to load unanswered questions.' });
+    }
+  },
+);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ROUTE 6 – POST /api/analytics/unanswered/:id/resolve
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Mark a question — and every unresolved question of the same bot with the
+ * same normalised text — as resolved. 404 if not found or not owned.
+ */
+router.post(
+  '/unanswered/:id/resolve',
+  param('id').isUUID().withMessage('id must be a valid UUID.'),
+  rejectInvalid,
+  async (req, res) => {
+    try {
+      const { rowCount } = await pool.query(
+        `UPDATE unanswered_questions u
+         SET resolved_at = NOW()
+         FROM unanswered_questions t
+         JOIN bots b ON b.id = t.bot_id
+         WHERE t.id = $1
+           AND b.user_id = $2
+           AND b.deleted_at IS NULL
+           AND u.bot_id = t.bot_id
+           AND u.resolved_at IS NULL
+           AND ${normalizedQuestion('u.question')} = ${normalizedQuestion('t.question')}`,
+        [req.params.id, req.user.sub],
+      );
+      if (!rowCount) return res.status(404).json({ error: 'Question not found.' });
+      return res.status(204).send();
+    } catch (err) {
+      console.error('[analytics] resolve unanswered error:', err.message);
+      return res.status(500).json({ error: 'Failed to resolve the question.' });
     }
   },
 );

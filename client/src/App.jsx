@@ -7,6 +7,7 @@ import Onboarding from './pages/Onboarding';
 import Dashboard from './pages/Dashboard';
 import Logs from './pages/Logs';
 import Topics from './pages/Topics';
+import Catalog from './pages/Catalog';
 import Settings from './pages/Settings';
 
 export default function App() {
@@ -36,6 +37,7 @@ export default function App() {
         <Route path="bots/:id" element={<Dashboard />} />
         <Route path="logs" element={<Logs />} />
         <Route path="topics" element={<Topics />} />
+        <Route path="catalog" element={<Catalog />} />
         <Route path="settings" element={<Settings />} />
       </Route>
 

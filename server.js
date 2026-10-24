@@ -11,11 +11,17 @@ const { router: openaiRouter } = require('./auth/openai-project');
 const botsRouter      = require('./bots/bots');
 const analyticsRouter = require('./analytics/analytics');
 const chatRouter      = require('./chat/chat');
+const catalogRouter   = require('./catalog/routes');
+const { recoverInterruptedImports } = require('./catalog/ingest');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
+
+// Mounted before the dashboard CORS middleware below: the widget calls /chat
+// from customer origins, and the chat router answers its own preflights.
+app.use('/chat', chatRouter);
 
 app.use((req, res, next) => {
   const origin = process.env.FRONTEND_URL || 'http://localhost:5173';
@@ -36,9 +42,9 @@ app.get('/health', (_req, res) => {
 app.use('/auth', googleAuthRouter);
 app.use('/auth', openaiOAuthRouter);
 app.use('/openai', openaiRouter);
+app.use('/api/bots/:id/catalog', catalogRouter);
 app.use('/api/bots', botsRouter);
 app.use('/api/analytics', analyticsRouter);
-app.use('/chat', chatRouter);
 app.use(express.static('public'));
 
 app.use((err, _req, res, _next) => {
@@ -48,6 +54,10 @@ app.use((err, _req, res, _next) => {
 
 app.listen(PORT, () => {
   console.log(`BotForge API listening on http://localhost:${PORT}`);
+
+  recoverInterruptedImports()
+    .then((count) => { if (count) console.warn(`[catalog] Marked ${count} interrupted import(s) as failed.`); })
+    .catch((err) => console.error('[catalog] Could not recover interrupted imports:', err.message));
 
   const googleId = process.env.GOOGLE_CLIENT_ID ?? '';
   if (!googleId || googleId.includes('your_google_client_id')) {

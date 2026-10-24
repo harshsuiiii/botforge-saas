@@ -8,7 +8,8 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': 'http://localhost:3000',
-      '/auth': 'http://localhost:3000',
+      // /auth/callback is a client route (Google OAuth lands there), so keep it out of the proxy
+      '^/auth/(?!callback(?:[/?#]|$))': 'http://localhost:3000',
     },
   },
 });

@@ -19,7 +19,9 @@
  *
  * Response (on success):
  *   Content-Type: text/event-stream
+ *   First chunk:          data: {"session_id":"..."}\n\n
  *   Streaming SSE chunks: data: {"delta":"..."}\n\n
+ *   Product cards:        data: {"products":[...]}\n\n   (catalog bots, when products matched)
  *   Final chunk:          data: [DONE]\n\n
  *
  * Response (on block):
@@ -33,10 +35,12 @@
  *  3. Load session history (if session_id supplied)
  *  4. Topic-block detection against user message
  *  5. Decrypt owner's OpenAI token (AES-256-GCM)
- *  6. Build messages array: [system, ...history, user]
- *  7. Call OpenAI /v1/chat/completions with stream:true
- *  8. Pipe SSE chunks to client
- *  9. On stream end: upsert session (turn_count, messages, topics_detected, outcome)
+ *  6. Build messages array: [system (+ catalog section), ...history, user]
+ *  7. Call OpenAI /v1/chat/completions with stream:true (catalog bots also get
+ *     search_products / search_info tools; up to 2 tool rounds)
+ *  8. Pipe SSE chunks to client, then product cards for matched products
+ *  9. On stream end: log unanswered questions; upsert session (turn_count,
+ *     messages incl. product_ids, topics_detected, outcome)
  */
 
 const express = require('express');
@@ -44,13 +48,21 @@ const crypto  = require('crypto');
 const { v4: uuidv4 } = require('uuid');
 
 const pool = require('../auth/db');
+const { getOwnerToken } = require('../auth/token-crypto');
+const {
+  TOOL_DEFINITIONS, DEFAULT_FALLBACK_MESSAGE, buildCatalogPrompt, runToolCall,
+} = require('../catalog/tools');
 
 const router = express.Router();
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const OPENAI_CHAT_URL  = 'https://api.openai.com/v1/chat/completions';
-const ENCRYPTION_ALGO  = 'aes-256-gcm';
+const CATALOG_TEMPERATURE      = 0.3;
+const MAX_TOOL_ROUNDS          = 2;
+const MAX_TOOL_CALLS_PER_ROUND = 3;
+const MAX_PRODUCT_CARDS        = 4;
+const STREAM_ERROR_TEXT        = '\n\nSorry, something went wrong.';
 const REFUSAL_MESSAGE  =
   "I'm sorry, but I'm not able to discuss that topic. " +
   'Is there something else I can help you with?';
@@ -73,38 +85,6 @@ router.use((req, res, next) => {
   }
   next();
 });
-
-// ─── Crypto helpers ───────────────────────────────────────────────────────────
-
-/**
- * Return the 32-byte AES key from TOKEN_ENCRYPTION_KEY env var.
- */
-function getEncryptionKey() {
-  const hexKey = process.env.TOKEN_ENCRYPTION_KEY;
-  if (!hexKey || hexKey.length !== 64) {
-    throw new Error('TOKEN_ENCRYPTION_KEY must be a 64-character hex string.');
-  }
-  return Buffer.from(hexKey, 'hex');
-}
-
-/**
- * Decrypt an AES-256-GCM ciphertext stored in openai_tokens.
- * Convention: last 16 bytes of encryptedToken Buffer are the GCM auth tag.
- *
- * @param {Buffer} encryptedToken
- * @param {Buffer} iv
- * @returns {string} plaintext API key
- */
-function decryptToken(encryptedToken, iv) {
-  const key        = getEncryptionKey();
-  const authTag    = encryptedToken.slice(-16);
-  const ciphertext = encryptedToken.slice(0, -16);
-
-  const decipher = crypto.createDecipheriv(ENCRYPTION_ALGO, key, iv);
-  decipher.setAuthTag(authTag);
-
-  return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
-}
 
 // ─── Fingerprint ──────────────────────────────────────────────────────────────
 
@@ -190,6 +170,12 @@ async function resolveBotByEmbedKey(embedKey) {
             b.model,
             b.openai_project_id,
             b.deleted_at,
+            b.answer_mode,
+            b.fallback_message,
+            -- Stored catalog data, not source status: a running or failed
+            -- re-sync keeps the previous import's rows, so chat keeps using them.
+            (EXISTS (SELECT 1 FROM catalog_products cp WHERE cp.bot_id = b.id)
+             OR EXISTS (SELECT 1 FROM catalog_info ci WHERE ci.bot_id = b.id)) AS has_catalog,
             ec.domain_allowlist
      FROM   embed_configs ec
      JOIN   bots b ON b.id = ec.bot_id
@@ -200,30 +186,13 @@ async function resolveBotByEmbedKey(embedKey) {
 }
 
 /**
- * Fetch the encrypted OpenAI token for a user.
- *
- * @param {string} userId
- * @returns {Promise<{encrypted_token: Buffer, iv: Buffer}|null>}
- */
-async function getEncryptedToken(userId) {
-  const { rows } = await pool.query(
-    `SELECT encrypted_token, iv
-     FROM   openai_tokens
-     WHERE  user_id = $1
-     ORDER  BY updated_at DESC
-     LIMIT  1`,
-    [userId],
-  );
-  return rows[0] ?? null;
-}
-
-/**
- * Load conversation history from an existing session.
+ * Load the stored messages of an existing session, unchanged
+ * ({role, content, ts, product_ids?}) so they can be persisted again as-is.
  * Returns [] if no session found with the given id + bot_id pair.
  *
  * @param {string} sessionId
  * @param {string} botId
- * @returns {Promise<Array<{role:string, content:string}>>}
+ * @returns {Promise<Array<{role:string, content:string, ts?:string, product_ids?:string[]}>>}
  */
 async function loadSessionHistory(sessionId, botId) {
   const { rows } = await pool.query(
@@ -232,10 +201,7 @@ async function loadSessionHistory(sessionId, botId) {
   );
 
   if (!rows.length) return [];
-
-  // messages is stored as JSONB: [{role, content, ts}, ...]
-  // Strip `ts` so OpenAI only sees {role, content}
-  return (rows[0].messages ?? []).map(({ role, content }) => ({ role, content }));
+  return rows[0].messages ?? [];
 }
 
 /**
@@ -287,21 +253,34 @@ async function upsertSession({
   );
 }
 
+/**
+ * Record a visitor question the catalog could not answer. Best effort.
+ */
+async function logUnanswered(botId, sessionId, question, reason) {
+  try {
+    await pool.query(
+      `INSERT INTO unanswered_questions (bot_id, session_id, question, reason)
+       VALUES ($1, $2, $3, $4)`,
+      [botId, sessionId, question, reason],
+    );
+  } catch (err) {
+    console.error('[chat] Failed to log unanswered question:', err.message);
+  }
+}
+
 // ─── OpenAI streaming ─────────────────────────────────────────────────────────
 
 /**
- * callOpenAIStream
- * ────────────────
  * POST to OpenAI chat completions with stream:true.
  * Returns the raw fetch Response (body is a ReadableStream of SSE bytes).
  *
- * @param {string}   token    – decrypted OpenAI API key
- * @param {string}   model    – e.g. "gpt-4o", "gpt-4o-mini"
- * @param {Array}    messages – [{role, content}, ...]
- * @param {string|null} projectId – OpenAI project ID (sets OpenAI-Project header)
+ * @param {string} token – decrypted OpenAI API key
+ * @param {{ model: string, messages: Array, projectId: string|null,
+ *           tools?: Array, toolChoice?: string }} opts
+ *   tools/toolChoice (and the catalog temperature) are sent only when tools is given.
  * @returns {Promise<Response>}
  */
-async function callOpenAIStream(token, model, messages, projectId) {
+async function openChatStream(token, { model, messages, projectId, tools, toolChoice }) {
   const headers = {
     'Authorization': `Bearer ${token}`,
     'Content-Type' : 'application/json',
@@ -311,18 +290,93 @@ async function callOpenAIStream(token, model, messages, projectId) {
     headers['OpenAI-Project'] = projectId;
   }
 
-  const response = await fetch(OPENAI_CHAT_URL, {
-    method : 'POST',
-    headers,
-    body   : JSON.stringify({
-      model,
-      messages,
-      stream          : true,
-      stream_options  : { include_usage: false },
-    }),
-  });
+  const body = {
+    model,
+    messages,
+    stream        : true,
+    stream_options: { include_usage: false },
+  };
+  if (tools) {
+    body.tools       = tools;
+    body.tool_choice = toolChoice ?? 'auto';
+    body.temperature = CATALOG_TEMPERATURE;
+  }
 
-  return response;
+  return fetch(OPENAI_CHAT_URL, { method: 'POST', headers, body: JSON.stringify(body) });
+}
+
+/**
+ * Read an OpenAI SSE stream: forward content deltas to the client as
+ * { delta } and collect tool_calls deltas by index.
+ *
+ * @returns {Promise<{ text: string, toolCalls: Array<{ id, name, arguments }>, finishReason: string|null }>}
+ */
+async function readCompletion(res, openaiResponse) {
+  const reader  = openaiResponse.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  const calls   = new Map();
+  let text         = '';
+  let buffer       = '';
+  let finishReason = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+
+    // SSE lines are delimited by \n — process each complete line
+    const lines = buffer.split('\n');
+    buffer = lines.pop(); // keep incomplete tail for next iteration
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || !trimmed.startsWith('data:')) continue;
+
+      const raw = trimmed.slice('data:'.length).trim();
+      if (raw === '[DONE]') continue; // we emit our own [DONE]
+
+      let parsed;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        continue; // malformed chunk — skip
+      }
+
+      const choice = parsed?.choices?.[0];
+      if (choice?.finish_reason) finishReason = choice.finish_reason;
+
+      const delta = choice?.delta?.content;
+      if (delta) {
+        text += delta;
+        sseWrite(res, { delta });
+      }
+
+      for (const part of choice?.delta?.tool_calls ?? []) {
+        const call = calls.get(part.index) ?? { id: null, name: '', arguments: '' };
+        if (part.id) call.id = part.id;
+        if (part.function?.name) call.name += part.function.name;
+        if (part.function?.arguments) call.arguments += part.function.arguments;
+        calls.set(part.index, call);
+      }
+    }
+  }
+
+  const toolCalls = [...calls.entries()].sort(([a], [b]) => a - b).map(([, c]) => c);
+  return { text, toolCalls, finishReason };
+}
+
+/**
+ * One OpenAI call after the SSE stream has started: open it, then stream it.
+ * @throws {Error} on a non-2xx response
+ */
+async function streamCompletion(res, token, opts) {
+  const openaiResponse = await openChatStream(token, opts);
+  if (!openaiResponse.ok) {
+    await openaiResponse.body?.cancel();
+    throw new Error(`OpenAI responded ${openaiResponse.status}`);
+  }
+  return readCompletion(res, openaiResponse);
 }
 
 // ─── SSE helpers ──────────────────────────────────────────────────────────────
@@ -398,13 +452,15 @@ router.post('/', async (req, res) => {
     : uuidv4();
 
   // ── Step 2: load existing session history ───────────────────────────────────
-  let history = [];
+  let storedMessages = [];
   try {
-    history = await loadSessionHistory(sessionId, bot.id);
+    storedMessages = await loadSessionHistory(sessionId, bot.id);
   } catch (err) {
     console.warn('[chat] Could not load session history:', err.message);
     // Non-fatal — proceed without history
   }
+  // OpenAI only sees {role, content}; stored messages keep ts and product_ids
+  const history = storedMessages.map(({ role, content }) => ({ role, content }));
 
   // ── Step 3: topic detection ─────────────────────────────────────────────────
   const detectedAllowed = detectTopics(userMessage, bot.topic_allow_list ?? []);
@@ -416,7 +472,7 @@ router.post('/', async (req, res) => {
   if (isBlocked) {
     // Persist blocked session turn before responding
     const blockedMessages = [
-      ...history.map((m) => ({ ...m, ts: new Date().toISOString() })),
+      ...storedMessages,
       { role: 'user',      content: userMessage,    ts: new Date().toISOString() },
       { role: 'assistant', content: REFUSAL_MESSAGE, ts: new Date().toISOString() },
     ];
@@ -446,30 +502,38 @@ router.post('/', async (req, res) => {
   // ── Step 4: decrypt OpenAI token ────────────────────────────────────────────
   let openaiToken;
   try {
-    const tokenRow = await getEncryptedToken(bot.user_id);
-    if (!tokenRow) {
+    openaiToken = await getOwnerToken(bot.user_id);
+    if (!openaiToken) {
       return res.status(503).json({ error: 'Bot is not connected to OpenAI.' });
     }
-    openaiToken = decryptToken(tokenRow.encrypted_token, tokenRow.iv);
   } catch (err) {
     console.error('[chat] Token decryption error:', err.message);
     return res.status(500).json({ error: 'Internal server error.' });
   }
 
   // ── Step 5: build messages array ────────────────────────────────────────────
-  const systemMessage  = { role: 'system', content: bot.system_prompt };
-  const userEntry      = { role: 'user',   content: userMessage };
-  const openaiMessages = [systemMessage, ...history, userEntry];
+  // Bots with a ready catalog get the search tools and the catalog prompt section.
+  const useCatalog = !!bot.has_catalog;
+  const systemContent = useCatalog
+    ? `${bot.system_prompt}\n\n${buildCatalogPrompt(bot)}`
+    : bot.system_prompt;
+  const openaiMessages = [
+    { role: 'system', content: systemContent },
+    ...history,
+    { role: 'user', content: userMessage },
+  ];
+  const callOptions = (toolChoice) => ({
+    model     : bot.model ?? 'gpt-4o-mini',
+    messages  : openaiMessages,
+    projectId : bot.openai_project_id ?? null,
+    tools     : useCatalog ? TOOL_DEFINITIONS : undefined,
+    toolChoice: useCatalog ? toolChoice : undefined,
+  });
 
-  // ── Step 6 & 7: call OpenAI with stream:true, pipe SSE to client ────────────
+  // ── Step 6: first OpenAI call (errors here are still plain JSON) ────────────
   let openaiResponse;
   try {
-    openaiResponse = await callOpenAIStream(
-      openaiToken,
-      bot.model ?? 'gpt-4o-mini',
-      openaiMessages,
-      bot.openai_project_id ?? null,
-    );
+    openaiResponse = await openChatStream(openaiToken, callOptions('auto'));
   } catch (err) {
     console.error('[chat] OpenAI fetch error:', err.message);
     return res.status(502).json({ error: 'Failed to reach OpenAI.' });
@@ -488,59 +552,68 @@ router.post('/', async (req, res) => {
   initSSE(res);
   sseWrite(res, { session_id: sessionId }); // send session_id as first event
 
-  let assistantReply  = '';
-  let buffer          = '';
-
-  const reader = openaiResponse.body.getReader();
-  const decoder = new TextDecoder('utf-8');
+  // ── Step 7: stream, running catalog tool rounds when the model asks ─────────
+  let assistantReply = '';
+  const cards        = new Map();
+  const searchCounts = [];
 
   try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    let result = await readCompletion(res, openaiResponse);
+    assistantReply += result.text;
 
-      buffer += decoder.decode(value, { stream: true });
+    for (let round = 1; useCatalog && result.finishReason === 'tool_calls' && result.toolCalls.length; round++) {
+      const calls = result.toolCalls;
+      openaiMessages.push({
+        role      : 'assistant',
+        content   : result.text || null,
+        tool_calls: calls.map((c) => ({ id: c.id, type: 'function', function: { name: c.name, arguments: c.arguments } })),
+      });
 
-      // SSE lines are delimited by \n — process each complete line
-      const lines = buffer.split('\n');
-      buffer = lines.pop(); // keep incomplete tail for next iteration
+      const outcomes = await Promise.all(calls.map((call, i) => (i < MAX_TOOL_CALLS_PER_ROUND
+        ? runToolCall(bot.id, openaiToken, call)
+        : { content: JSON.stringify({ error: 'too many calls' }), cards: [], searched: false, resultCount: 0 })));
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith('data:')) continue;
+      outcomes.forEach((outcome, i) => {
+        openaiMessages.push({ role: 'tool', tool_call_id: calls[i].id, content: outcome.content });
+        if (outcome.searched) searchCounts.push(outcome.resultCount);
+        for (const card of outcome.cards) if (!cards.has(card.id)) cards.set(card.id, card);
+      });
 
-        const raw = trimmed.slice('data:'.length).trim();
-        if (raw === '[DONE]') continue; // we emit our own [DONE]
-
-        let parsed;
-        try {
-          parsed = JSON.parse(raw);
-        } catch {
-          continue; // malformed chunk — skip
-        }
-
-        const delta = parsed?.choices?.[0]?.delta?.content;
-        if (delta) {
-          assistantReply += delta;
-          sseWrite(res, { delta });
-        }
-      }
+      result = await streamCompletion(res, openaiToken, callOptions(round >= MAX_TOOL_ROUNDS ? 'none' : 'auto'));
+      assistantReply += result.text;
     }
   } catch (streamErr) {
-    console.error('[chat] Stream read error:', streamErr.message);
-    // Attempt graceful close — client will see the [DONE] event missing
+    console.error('[chat] Stream error:', streamErr.message);
+    sseWrite(res, { delta: STREAM_ERROR_TEXT });
   }
+
+  // A strict "not in our catalog" reply must not show loosely matching products
+  const fallback = bot.fallback_message || DEFAULT_FALLBACK_MESSAGE;
+  const isStrictFallback = useCatalog && bot.answer_mode === 'strict' && assistantReply.includes(fallback);
+
+  const productCards = isStrictFallback ? [] : [...cards.values()].slice(0, MAX_PRODUCT_CARDS);
+  if (productCards.length) sseWrite(res, { products: productCards });
 
   // Send terminal event
   sseWrite(res, '[DONE]');
   res.end();
 
-  // ── Step 8: upsert session after stream ends ────────────────────────────────
+  // ── Step 8: log unanswered questions, upsert session after stream ends ──────
+  if (useCatalog) {
+    if (searchCounts.length && searchCounts.every((n) => n === 0)) {
+      logUnanswered(bot.id, sessionId, userMessage, 'no_results');
+    } else if (isStrictFallback) {
+      logUnanswered(bot.id, sessionId, userMessage, 'fallback');
+    }
+  }
+
   const now = new Date().toISOString();
+  const assistantEntry = { role: 'assistant', content: assistantReply, ts: now };
+  if (productCards.length) assistantEntry.product_ids = productCards.map((c) => c.id);
   const updatedMessages = [
-    ...history.map((m) => ({ ...m, ts: m.ts ?? now })),
-    { role: 'user',      content: userMessage,   ts: now },
-    { role: 'assistant', content: assistantReply, ts: now },
+    ...storedMessages,
+    { role: 'user', content: userMessage, ts: now },
+    assistantEntry,
   ];
 
   setImmediate(async () => {

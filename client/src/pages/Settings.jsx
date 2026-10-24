@@ -4,6 +4,13 @@ import BotSelector from '../components/BotSelector';
 import TagInput from '../components/TagInput';
 import EmbedSnippet from '../components/EmbedSnippet';
 
+const DEFAULT_FALLBACK_MESSAGE = "I'm sorry, I couldn't find that in our catalog. Please contact us for help.";
+
+const ANSWER_MODES = [
+  { id: 'flexible', label: 'Flexible', desc: 'Answers general questions too, but never invents products or prices.' },
+  { id: 'strict', label: 'Strict', desc: 'Only answers from your catalog.' },
+];
+
 const PERSONALITIES = [
   { id: 'friendly', label: 'Friendly', emoji: '😊' },
   { id: 'professional', label: 'Professional', emoji: '💼' },
@@ -20,6 +27,8 @@ export default function Settings() {
   const [instructions, setInstructions] = useState('');
   const [allowTopics, setAllowTopics] = useState([]);
   const [blockTopics, setBlockTopics] = useState([]);
+  const [answerMode, setAnswerMode] = useState('flexible');
+  const [fallbackMessage, setFallbackMessage] = useState('');
   const [embedSnippet, setEmbedSnippet] = useState('');
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -38,6 +47,8 @@ export default function Settings() {
         setInstructions(bot.instructions || '');
         setAllowTopics(bot.topic_allow_list || []);
         setBlockTopics(bot.topic_block_list || []);
+        setAnswerMode(bot.answer_mode || 'flexible');
+        setFallbackMessage(bot.fallback_message || '');
         setEmbedSnippet(bot.embed_snippet || '');
       })
       .catch(() => {})
@@ -72,6 +83,8 @@ export default function Settings() {
           instructions,
           topic_allow_list: allowTopics,
           topic_block_list: blockTopics,
+          answer_mode: answerMode,
+          fallback_message: fallbackMessage.trim() || null,
         }),
       });
       showToast('Settings saved successfully!');
@@ -181,6 +194,44 @@ export default function Settings() {
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-1">Blocked topics</label>
               <TagInput tags={blockTopics} onChange={setBlockTopics} variant="blocked" />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-2">Answer mode</label>
+              <div className="inline-flex rounded-lg border border-slate-300 p-1 bg-slate-50" role="radiogroup" aria-label="Answer mode">
+                {ANSWER_MODES.map((mode) => (
+                  <button
+                    key={mode.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={answerMode === mode.id}
+                    onClick={() => setAnswerMode(mode.id)}
+                    className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors ${
+                      answerMode === mode.id ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    {mode.label}
+                  </button>
+                ))}
+              </div>
+              <p className="text-xs text-slate-500 mt-2">
+                {ANSWER_MODES.find((m) => m.id === answerMode)?.desc}
+              </p>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1">Fallback message</label>
+              <textarea
+                value={fallbackMessage}
+                onChange={(e) => setFallbackMessage(e.target.value)}
+                maxLength={500}
+                rows={2}
+                placeholder={DEFAULT_FALLBACK_MESSAGE}
+                className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 resize-none"
+              />
+              <p className="text-xs text-slate-500 mt-1">
+                What the bot says when your catalog has nothing relevant. Add contact details here.
+              </p>
             </div>
 
             <button

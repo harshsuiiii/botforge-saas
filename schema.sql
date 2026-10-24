@@ -91,8 +91,8 @@ CREATE TABLE sessions (
 
 CREATE TABLE embed_configs (
     id              UUID    PRIMARY KEY DEFAULT gen_random_uuid(),
-    bot_id          UUID    NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
-    embed_key       TEXT    NOT NULL UNIQUE DEFAULT encode(gen_random_bytes(24), 'base64'),
+    bot_id          UUID    NOT NULL UNIQUE REFERENCES bots(id) ON DELETE CASCADE,  -- one embed config per bot
+    embed_key      TEXT    NOT NULL UNIQUE DEFAULT encode(gen_random_bytes(24), 'base64'),
     domain_allowlist TEXT[] NOT NULL DEFAULT '{}'
 );
 
@@ -119,8 +119,7 @@ CREATE INDEX idx_sessions_fingerprint  ON sessions(user_fingerprint);
 CREATE INDEX idx_sessions_messages_gin ON sessions USING GIN (messages);      -- fast JSONB queries
 CREATE INDEX idx_sessions_topics_gin   ON sessions USING GIN (topics_detected); -- fast array containment queries
 
--- embed_configs
-CREATE INDEX idx_embed_configs_bot_id    ON embed_configs(bot_id);
+-- embed_configs (bot_id is covered by its UNIQUE constraint)
 CREATE INDEX idx_embed_configs_embed_key ON embed_configs(embed_key);
 
 -- =============================================================

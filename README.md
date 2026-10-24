@@ -58,7 +58,11 @@ The backend modules are organized as follows:
    psql "$DATABASE_URL" -f schema.sql
    psql "$DATABASE_URL" -f migrations/002_bots_system_prompt.sql
    psql "$DATABASE_URL" -f migrations/003_users_default_spend_cap.sql
+   psql "$DATABASE_URL" -f migrations/004_embed_configs_unique_bot.sql
+   psql "$DATABASE_URL" -f migrations/005_catalog.sql
    ```
+
+   Migration 005 runs `CREATE EXTENSION vector` (pgvector), which needs database-owner rights. Hosted Postgres such as Supabase, Neon, or RDS supports it.
 
 4. Copy `.env.example` to `.env` and replace every placeholder. Do not commit `.env`.
 

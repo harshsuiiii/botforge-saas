@@ -24,12 +24,14 @@ const { body, param, validationResult } = require('express-validator');
 const pool                = require('../auth/db');
 const { authMiddleware }  = require('../auth/middleware');
 const { assembleSystemPrompt } = require('./system-prompt');
+const { requireBotOwner } = require('./ownership');
 
 const router = express.Router();
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const VALID_PERSONALITIES = ['friendly', 'professional', 'concise', 'expert'];
+const VALID_ANSWER_MODES  = ['strict', 'flexible'];
 const WIDGET_HOST         = process.env.WIDGET_HOST || process.env.FRONTEND_URL?.replace(':5173', ':3000') || 'http://localhost:3000';
 
 // ─── Validation helpers ───────────────────────────────────────────────────────
@@ -81,6 +83,17 @@ const botBodyValidators = [
   body('spend_cap')
     .optional({ nullable: true })
     .isFloat({ min: 0 }).withMessage('spend_cap must be a non-negative number.'),
+
+  body('answer_mode')
+    .optional()
+    .isIn(VALID_ANSWER_MODES)
+    .withMessage(`answer_mode must be one of: ${VALID_ANSWER_MODES.join(', ')}.`),
+
+  body('fallback_message')
+    .optional({ nullable: true })
+    .isString().withMessage('fallback_message must be a string.')
+    .trim()
+    .isLength({ max: 500 }).withMessage('fallback_message must be ≤ 500 characters.'),
 ];
 
 /**
@@ -93,39 +106,6 @@ function rejectInvalid(req, res, next) {
     return res.status(400).json({ error: 'Validation failed.', details: errors.array() });
   }
   next();
-}
-
-// ─── Ownership guard ──────────────────────────────────────────────────────────
-
-/**
- * Fetch a bot row and verify ownership.
- * Returns the row on success; writes the HTTP response and returns null on failure.
- *
- * @param {string} botId
- * @param {string} userId
- * @param {import('express').Response} res
- * @param {{ includeDeleted?: boolean }} opts
- * @returns {Promise<object | null>}
- */
-async function requireBotOwner(botId, userId, res, { includeDeleted = false } = {}) {
-  const deletedFilter = includeDeleted ? '' : 'AND deleted_at IS NULL';
-
-  const { rows } = await pool.query(
-    `SELECT * FROM bots WHERE id = $1 ${deletedFilter}`,
-    [botId],
-  );
-
-  if (!rows.length) {
-    res.status(404).json({ error: 'Bot not found.' });
-    return null;
-  }
-
-  if (rows[0].user_id !== userId) {
-    res.status(403).json({ error: 'Forbidden: you do not own this bot.' });
-    return null;
-  }
-
-  return rows[0];
 }
 
 // ─── Embed snippet builder ────────────────────────────────────────────────────
@@ -311,6 +291,10 @@ router.put(
           ? req.body.spend_cap
           : existing.spend_cap,
         model            : req.body.model            ?? existing.model,
+        answer_mode      : req.body.answer_mode      ?? existing.answer_mode,
+        fallback_message : req.body.fallback_message !== undefined
+          ? (req.body.fallback_message || null)
+          : existing.fallback_message,
       };
 
       // Re-assemble prompt from merged config
@@ -332,8 +316,10 @@ router.put(
            topic_block_list = $6,
            spend_cap        = $7,
            model            = $8,
-           system_prompt    = $9
-         WHERE id = $10
+           system_prompt    = $9,
+           answer_mode      = $10,
+           fallback_message = $11
+         WHERE id = $12
          RETURNING *`,
         [
           merged.name,
@@ -345,6 +331,8 @@ router.put(
           merged.spend_cap,
           merged.model,
           systemPrompt,
+          merged.answer_mode,
+          merged.fallback_message,
           botId,
         ],
       );

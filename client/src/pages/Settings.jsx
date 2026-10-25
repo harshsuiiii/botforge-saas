@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useApi } from '../hooks/useApi';
+import { useBots } from '../hooks/useBots';
 import BotSelector from '../components/BotSelector';
 import TagInput from '../components/TagInput';
 import EmbedSnippet from '../components/EmbedSnippet';
@@ -56,14 +57,10 @@ export default function Settings() {
       .finally(() => setLoading(false));
   }, [botId, apiJson]);
 
+  const { bots, loading: loadingBots } = useBots();
   useEffect(() => {
-    apiJson('/api/bots')
-      .then((data) => {
-        const bots = data.bots || [];
-        if (bots.length && !botId) setBotId(bots[0].id);
-      })
-      .catch(() => {});
-  }, [apiJson, botId]);
+    if (bots.length && !botId) setBotId(bots[0].id);
+  }, [bots, botId]);
 
   function showToast(msg) {
     setToast(msg);
@@ -128,6 +125,10 @@ export default function Settings() {
       )}
 
       {loading ? (
+        <div className="flex justify-center py-20">
+          <div className="w-8 h-8 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin" />
+        </div>
+      ) : !botId && loadingBots ? (
         <div className="flex justify-center py-20">
           <div className="w-8 h-8 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin" />
         </div>

@@ -23,7 +23,7 @@ The backend modules are organized as follows:
 | Path | Responsibility |
 | --- | --- |
 | `server.js` | Express application, CORS, route registration, static widget hosting |
-| `auth/` | Google OAuth, OpenAI OAuth, JWT verification, PostgreSQL pool |
+| `auth/` | Google OAuth + login codes, dev sign-in, OpenAI API keys, JWT verification, PostgreSQL pool |
 | `bots/` | Authenticated chatbot CRUD and embed-key management |
 | `chat/` | Public widget chat endpoint, topic checks, OpenAI streaming, sessions |
 | `analytics/` | Authenticated dashboard metrics and session-log APIs |
@@ -102,11 +102,11 @@ Use `openssl rand -hex 32` or Node's `crypto.randomBytes(32).toString('hex')` to
 
 This project is a strong MVP foundation, but the following should be completed before public production traffic:
 
-- Add rate limiting, bot/tenant quotas, abuse controls, and strict origin allowlist enforcement to `/chat`.
-- Enforce per-bot spend limits before calling OpenAI; the database field alone does not stop usage.
-- Replace JWT-in-URL OAuth flow with short-lived, server-side, single-use OAuth state; avoid storing long-lived browser tokens in `localStorage`.
+- `/chat` rate limits and login codes live in process memory; use a shared store (e.g. Redis) before running more than one API instance, and set Express `trust proxy` behind a reverse proxy so limits see real client IPs.
+- Add bot/tenant quotas and enforce per-bot spend limits before calling OpenAI; the database field alone does not stop usage.
+- Add CSRF protection to the Google OAuth `state`, and avoid storing long-lived browser tokens in `localStorage`.
 - Establish transcript retention/deletion policies and cap conversation history sent to the model.
-- Add TLS/reverse-proxy configuration, security headers, structured observability, backups with restore tests, CI, and automated tests.
+- Add TLS/reverse-proxy configuration, security headers, structured observability, backups with restore tests, and CI (the `npm test` suite exists).
 
 ## Scripts
 

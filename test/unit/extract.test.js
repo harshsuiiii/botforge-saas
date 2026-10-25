@@ -18,6 +18,50 @@ let stub;
 test.beforeEach(() => { stub = installOpenAIStub(); });
 test.afterEach(() => stub.restore());
 
+const twoWindows = `${'a'.repeat(7000)}\n\n${'b'.repeat(7000)}`;
+const rawReply = (message) => ({ json: { choices: [{ message, finish_reason: 'stop' }] } });
+
+test('skips a window whose JSON is broken and keeps the rest', async () => {
+  stub.queueChat(rawReply({ content: '{"products": [{"name": "Cut off' }));
+  stub.queueChat(extraction([product({ name: 'Rain Jacket' })]));
+  const { products } = await extractCatalog('sk-test', [{ url: null, text: twoWindows }]);
+  assert.deepEqual(products.map((p) => p.name), ['Rain Jacket']);
+});
+
+test('skips a window the model refused', async () => {
+  stub.queueChat(rawReply({ content: null, refusal: 'I cannot help with that.' }));
+  stub.queueChat(extraction([product({ name: 'Cap' })]));
+  const { products } = await extractCatalog('sk-test', [{ url: null, text: twoWindows }]);
+  assert.deepEqual(products.map((p) => p.name), ['Cap']);
+});
+
+test('fails with a clear message when every window fails', async () => {
+  stub.queueChat(rawReply({ content: 'not json' }));
+  stub.queueChat(rawReply({ content: null, refusal: 'no' }));
+  await assert.rejects(
+    extractCatalog('sk-test', [{ url: null, text: twoWindows }]),
+    /Could not read any products or information/,
+  );
+});
+
+test('still fails on OpenAI errors such as a bad key', async () => {
+  stub.queueChat({ status: 401, json: { error: { message: 'bad key' } } });
+  await assert.rejects(extractCatalog('sk-test', [{ url: null, text: 'Cap' }]), (err) => err.status === 401);
+});
+
+test('resolves relative product and image URLs against the page', async () => {
+  stub.queueChat(extraction([product({ name: 'Cap', url: '/p/1', image_url: 'img/cap.jpg' })]));
+  const { products } = await extractCatalog('sk-test', [{ url: 'https://shop.test/cat/', text: 'Cap' }]);
+  assert.equal(products[0].url, 'https://shop.test/p/1');
+  assert.equal(products[0].image_url, 'https://shop.test/cat/img/cap.jpg');
+});
+
+test('sends the OpenAI-Project header when given', async () => {
+  stub.queueChat(extraction());
+  await extractCatalog('sk-test', [{ url: null, text: 'Cap' }], { projectId: 'proj_123' });
+  assert.equal(stub.requests[0].headers['OpenAI-Project'], 'proj_123');
+});
+
 test('splits on paragraph boundaries', () => {
   const para = (c) => c.repeat(5000);
   const windows = splitIntoWindows([para('a'), para('b'), para('c')].join('\n\n'), 12000);

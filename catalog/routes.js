@@ -23,8 +23,13 @@ const { getOwnerToken }    = require('../auth/token-crypto');
 const { loadOwnedBot, UUID_RE } = require('../bots/ownership');
 const { assertPublicUrl }  = require('./url-guard');
 const { runIngest, NO_TOKEN_MESSAGE } = require('./ingest');
+const { createTaskQueue } = require('./task-queue');
 
 const router = express.Router({ mergeParams: true });
+
+// Imports are memory- and network-heavy; queued ones stay 'pending' until a slot frees.
+const MAX_CONCURRENT_IMPORTS = 2;
+const importQueue = createTaskQueue(MAX_CONCURRENT_IMPORTS);
 
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 
@@ -89,7 +94,7 @@ async function preflight(bot) {
 }
 
 function startIngest(sourceId, payload) {
-  setImmediate(() => runIngest(sourceId, payload));
+  importQueue.run(() => runIngest(sourceId, payload));
 }
 
 router.use(authMiddleware, loadOwnedBot);

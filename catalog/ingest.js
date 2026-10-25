@@ -48,6 +48,8 @@ function dedupeInfo(info) {
 
 /** @returns {Promise<{ products: object[], info: object[], skipped: number }>} */
 async function loadItems(source, payload, token, deps) {
+  const openaiOpts = { projectId: source.openai_project_id ?? null };
+
   if (source.kind === 'spreadsheet') {
     const { products, skipped } = await deps.parseSpreadsheet(payload.buffer, payload.filename ?? source.name);
     return { products, info: [], skipped };
@@ -56,13 +58,13 @@ async function loadItems(source, payload, token, deps) {
   if (source.kind === 'pdf') {
     const text = await deps.parsePdf(payload.buffer);
     if (!text.trim()) throw new Error('No text could be read from the PDF.');
-    return { ...(await deps.extractCatalog(token, [{ url: null, text }])), skipped: 0 };
+    return { ...(await deps.extractCatalog(token, [{ url: null, text }], openaiOpts)), skipped: 0 };
   }
 
   if (source.kind === 'url') {
     const pages = await deps.crawlSite(payload.url ?? source.name);
     if (!pages.length) throw new Error('No readable pages were found at that URL.');
-    return { ...(await deps.extractCatalog(token, pages)), skipped: 0 };
+    return { ...(await deps.extractCatalog(token, pages, openaiOpts)), skipped: 0 };
   }
 
   throw new Error(`Unknown source kind: ${source.kind}`);
@@ -152,7 +154,7 @@ async function runIngest(sourceId, payload, deps = {}) {
 
   try {
     const { rows } = await pool.query(
-      `SELECT s.*, b.user_id
+      `SELECT s.*, b.user_id, b.openai_project_id
        FROM catalog_sources s
        JOIN bots b ON b.id = s.bot_id
        WHERE s.id = $1`,
@@ -191,8 +193,9 @@ async function runIngest(sourceId, payload, deps = {}) {
     const newInfo         = info.filter((i) => !knownInfo.has(i.content_hash));
 
     // ── Embed only what changed ───────────────────────────────────────
-    const productVectors = await embedTexts(token, changedProducts.map(productEmbeddingText));
-    const infoVectors    = await embedTexts(token, newInfo.map(infoEmbeddingText));
+    const openaiOpts     = { projectId: source.openai_project_id ?? null };
+    const productVectors = await embedTexts(token, changedProducts.map(productEmbeddingText), openaiOpts);
+    const infoVectors    = await embedTexts(token, newInfo.map(infoEmbeddingText), openaiOpts);
 
     await saveItems(
       source, changedProducts, productVectors, newInfo, infoVectors,

@@ -38,6 +38,16 @@ test.before(async () => {
 
 test.after(() => stub.restore());
 
+test("bills catalog OpenAI calls to the bot's OpenAI project", async () => {
+  const { botId } = await seedBot(pool, { botFields: { openai_project_id: 'proj_shop' } });
+  const sourceId = await insertSource(botId);
+  const before = stub.requests.length;
+  await runIngest(sourceId, { buffer: csv('name,price\nCap,199\n'), filename: 'c.csv' });
+  const calls = stub.requests.slice(before).filter((r) => r.path === '/v1/embeddings');
+  assert.ok(calls.length > 0);
+  assert.ok(calls.every((r) => r.headers['OpenAI-Project'] === 'proj_shop'));
+});
+
 test('imports a spreadsheet and marks it ready', async () => {
   const { botId } = await seedBot(pool);
   const sourceId = await insertSource(botId);

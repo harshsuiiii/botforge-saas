@@ -4,6 +4,14 @@ const passport      = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const jwt           = require('jsonwebtoken');
 const pool          = require('./db');
+const { issueLoginCode, redeemLoginCode } = require('./login-codes');
+
+/** True when real Google OAuth credentials are set (not missing or .env.example placeholders). */
+function isGoogleConfigured() {
+  const id     = process.env.GOOGLE_CLIENT_ID ?? '';
+  const secret = process.env.GOOGLE_CLIENT_SECRET ?? '';
+  return !!id && !!secret && !id.includes('your_google_client_id') && !secret.includes('your_google_client_secret');
+}
 
 /**
  * Google OAuth 2.0 Strategy
@@ -11,9 +19,10 @@ const pool          = require('./db');
  * Scopes: profile + email only.
  * On callback:
  *   1. Upsert user row by google_id (email may update if changed).
- *   2. Return the db user object; the route handler issues the JWT.
+ *   2. Return the db user object; the route handler issues a login code.
+ * Registered only when credentials are configured (the strategy throws without a client id).
  */
-passport.use(
+if (isGoogleConfigured()) passport.use(
   new GoogleStrategy(
     {
       clientID:     process.env.GOOGLE_CLIENT_ID,
@@ -76,25 +85,53 @@ const router  = express.Router();
  */
 router.get(
   '/google',
+  (req, res, next) => {
+    if (isGoogleConfigured()) return next();
+    const frontend = process.env.FRONTEND_URL || 'http://localhost:5173';
+    return res.redirect(`${frontend}/login?error=google_not_configured`);
+  },
   passport.authenticate('google', { session: false, scope: ['profile', 'email'] }),
 );
 
 /**
+ * Front-end callback URL carrying a single-use login code (never the JWT,
+ * which would otherwise end up in browser history and logs).
+ */
+function callbackRedirectUrl(userId) {
+  const frontend = process.env.FRONTEND_URL || 'http://localhost:5173';
+  return `${frontend}/auth/callback?code=${issueLoginCode(userId)}`;
+}
+
+/**
  * GET /auth/google/callback
  * Google redirects here after the user grants consent.
- * Issues a JWT and returns it (as JSON or a redirect with the token in the URL,
- * depending on your front-end architecture).
  */
 router.get(
   '/google/callback',
   passport.authenticate('google', { session: false, failureRedirect: '/auth/failure' }),
-  (req, res) => {
-    const token = issueToken(req.user.id);
-    const frontend = process.env.FRONTEND_URL || 'http://localhost:5173';
-    const email = encodeURIComponent(req.user.email ?? '');
-    res.redirect(`${frontend}/auth/callback?token=${token}&email=${email}`);
-  },
+  (req, res) => res.redirect(callbackRedirectUrl(req.user.id)),
 );
+
+/**
+ * POST /auth/exchange  { code } → { token, user }
+ * Swap a login code from a sign-in redirect for a JWT. Codes work once, for 60 s.
+ */
+router.post('/exchange', async (req, res) => {
+  const code = typeof req.body?.code === 'string' ? req.body.code : '';
+  if (!code) return res.status(400).json({ error: 'code is required.' });
+
+  const userId = redeemLoginCode(code);
+  if (!userId) return res.status(401).json({ error: 'This sign-in link has expired. Please sign in again.' });
+
+  try {
+    const { rows } = await pool.query('SELECT id, email, google_id, created_at FROM users WHERE id = $1', [userId]);
+    if (!rows.length) return res.status(401).json({ error: 'User not found.' });
+    return res.json({ token: issueToken(userId), user: rows[0] });
+  } catch (err) {
+    console.error('[auth] exchange error:', err.message);
+    return res.status(500).json({ error: 'Failed to complete sign-in.' });
+  }
+});
 
 router.get('/failure', (_req, res) => {
   const frontend = process.env.FRONTEND_URL || 'http://localhost:5173';
@@ -116,4 +153,4 @@ router.get('/me', require('./middleware').authMiddleware, async (req, res) => {
   }
 });
 
-module.exports = { router, issueToken };
+module.exports = { router, issueToken, callbackRedirectUrl, isGoogleConfigured };

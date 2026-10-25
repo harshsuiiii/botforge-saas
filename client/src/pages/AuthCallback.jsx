@@ -1,39 +1,26 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { API_URL } from '../config/api';
 import { useAuth } from '../context/AuthContext';
+import { completeSignIn } from '../config/signIn';
 
 export default function AuthCallback() {
   const [params] = useSearchParams();
   const { login } = useAuth();
   const navigate = useNavigate();
+  const started = useRef(false); // login codes work once; StrictMode runs effects twice
 
   useEffect(() => {
-    const token = params.get('token');
-    const email = params.get('email');
+    if (started.current) return;
+    started.current = true;
 
-    if (!token) {
+    const code = params.get('code');
+    if (!code) {
       navigate('/login', { replace: true });
       return;
     }
 
-    login(token, email ? { email } : null);
-
-    (async () => {
-      try {
-        const res = await fetch(`${API_URL}/api/bots`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        const data = await res.json();
-        if ((data.bots || []).length === 0) {
-          navigate('/onboarding', { replace: true });
-        } else {
-          navigate('/dashboard', { replace: true });
-        }
-      } catch {
-        navigate('/onboarding', { replace: true });
-      }
-    })();
+    completeSignIn(code, login, navigate)
+      .catch(() => navigate('/login?error=auth_failed', { replace: true }));
   }, [params, login, navigate]);
 
   return (

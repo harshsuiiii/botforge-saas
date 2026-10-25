@@ -5,7 +5,8 @@ require('dotenv').config();
 const express  = require('express');
 const passport = require('passport');
 
-const { router: googleAuthRouter } = require('./auth/google');
+const { router: googleAuthRouter, isGoogleConfigured } = require('./auth/google');
+const { router: devLoginRouter } = require('./auth/dev-login');
 const openaiKeyRouter = require('./auth/openai-key');
 const { router: openaiRouter } = require('./auth/openai-project');
 const botsRouter      = require('./bots/bots');
@@ -40,6 +41,7 @@ app.get('/health', (_req, res) => {
 });
 
 app.use('/auth', googleAuthRouter);
+app.use('/auth', devLoginRouter);
 app.use('/auth', openaiKeyRouter);
 app.use('/openai', openaiRouter);
 app.use('/api/bots/:id/catalog', catalogRouter);
@@ -59,13 +61,16 @@ app.listen(PORT, () => {
     .then((count) => { if (count) console.warn(`[catalog] Marked ${count} interrupted import(s) as failed.`); })
     .catch((err) => console.error('[catalog] Could not recover interrupted imports:', err.message));
 
-  const googleId = process.env.GOOGLE_CLIENT_ID ?? '';
-  if (!googleId || googleId.includes('your_google_client_id')) {
+  if (!isGoogleConfigured()) {
     console.warn(
       '\n⚠  Google OAuth is not configured.\n' +
       '   Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in .env\n' +
       '   Create credentials: https://console.cloud.google.com/apis/credentials\n' +
-      '   Redirect URI must be: http://localhost:3000/auth/google/callback\n',
+      `   Redirect URI must be: ${process.env.GOOGLE_CALLBACK_URL || `http://localhost:${PORT}/auth/google/callback`}\n`,
     );
+  }
+
+  if (process.env.DEV_LOGIN === 'true' && process.env.NODE_ENV !== 'production') {
+    console.warn('⚠  DEV_LOGIN is on: "Continue as dev user" signs in without Google (localhost only).\n');
   }
 });

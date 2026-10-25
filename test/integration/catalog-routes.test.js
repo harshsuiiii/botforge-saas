@@ -139,6 +139,26 @@ test('refuses a second import while one is running', async () => {
   assert.equal((await res.json()).error, 'An import is already running for this bot.');
 });
 
+test('simultaneous imports get one 202 and the rest 429, never 500', async () => {
+  const { botId, userId } = await seedBot(pool);
+  stub.delayEmbeddings(300); // keep the winning import running while the others arrive
+  try {
+    const statuses = (await Promise.all(Array.from({ length: 4 }, () => upload(botId, userId))))
+      .map((r) => r.status).sort();
+    assert.deepEqual(statuses, [202, 429, 429, 429]);
+  } finally {
+    stub.delayEmbeddings(0);
+  }
+});
+
+test('accepts CSV files sent with generic MIME types', async () => {
+  for (const type of ['text/plain', 'application/csv', 'text/x-csv', 'application/octet-stream']) {
+    const { botId, userId } = await seedBot(pool);
+    const res = await upload(botId, userId, { type });
+    assert.equal(res.status, 202, type);
+  }
+});
+
 test('forbids other users', async () => {
   const { botId } = await seedBot(pool);
   const { userId: other } = await seedBot(pool);

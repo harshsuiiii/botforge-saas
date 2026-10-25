@@ -46,6 +46,7 @@ function installOpenAIStub() {
   const requests  = [];
   const chatQueue = [];
   let failEmbeddings = false;
+  let embedDelayMs = 0;
 
   globalThis.fetch = async (input, init = {}) => {
     const url = typeof input === 'string' ? input : input.url;
@@ -56,6 +57,7 @@ function installOpenAIStub() {
     requests.push({ path, body });
 
     if (path === '/v1/embeddings') {
+      if (embedDelayMs) await new Promise((r) => setTimeout(r, embedDelayMs));
       if (failEmbeddings) return jsonResponse(500, { error: { message: 'stub embeddings failure' } });
       const inputs = Array.isArray(body.input) ? body.input : [body.input];
       return jsonResponse(200, {
@@ -78,6 +80,7 @@ function installOpenAIStub() {
     requests,
     queueChat(reply) { chatQueue.push(reply); },
     failEmbeddings(on) { failEmbeddings = on; },
+    delayEmbeddings(ms) { embedDelayMs = ms; },
     restore() { globalThis.fetch = realFetch; },
   };
 }

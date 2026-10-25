@@ -160,9 +160,10 @@ test('imports a URL source through crawl and extraction', async () => {
 
 test('recovers interrupted imports', async () => {
   const { botId } = await seedBot(pool);
+  const { botId: otherBot } = await seedBot(pool); // one running import per bot
   await pool.query(`UPDATE catalog_sources SET status = 'ready' WHERE status IN ('pending', 'processing')`);
   const a = await insertSource(botId, 'spreadsheet', 'a.csv', 'pending');
-  const b = await insertSource(botId, 'spreadsheet', 'b.csv', 'processing');
+  const b = await insertSource(otherBot, 'spreadsheet', 'b.csv', 'processing');
   const c = await insertSource(botId, 'spreadsheet', 'c.csv', 'ready');
 
   assert.equal(await recoverInterruptedImports(), 2);

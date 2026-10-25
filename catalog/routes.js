@@ -29,11 +29,18 @@ const router = express.Router({ mergeParams: true });
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 
 const KIND_BY_EXTENSION = { '.csv': 'spreadsheet', '.xlsx': 'spreadsheet', '.pdf': 'pdf' };
+// Browsers and operating systems label CSV files inconsistently; the parser
+// validates the content, so generic types are accepted for .csv / .xlsx.
 const ALLOWED_MIME = {
-  '.csv' : ['text/csv', 'application/vnd.ms-excel'],
-  '.xlsx': ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
+  '.csv' : ['text/csv', 'application/vnd.ms-excel', 'text/plain', 'application/csv', 'text/x-csv', 'application/octet-stream'],
+  '.xlsx': ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/octet-stream'],
   '.pdf' : ['application/pdf'],
 };
+
+const RUNNING_IMPORT_MESSAGE = 'An import is already running for this bot.';
+
+/** Unique violation of uq_catalog_sources_one_running: another import won the race. */
+const isRunningImportConflict = (err) => err?.code === '23505';
 
 const SOURCE_COLUMNS = 'id, kind, name, status, error, item_count, last_synced_at, created_at, updated_at';
 
@@ -77,7 +84,7 @@ async function preflight(bot) {
     `SELECT 1 FROM catalog_sources WHERE bot_id = $1 AND status IN ('pending', 'processing') LIMIT 1`,
     [bot.id],
   );
-  if (rows.length) return { status: 429, error: 'An import is already running for this bot.' };
+  if (rows.length) return { status: 429, error: RUNNING_IMPORT_MESSAGE };
   return null;
 }
 
@@ -140,6 +147,7 @@ router.post('/sources', acceptFile, async (req, res) => {
     startIngest(source.id, payload);
     return res.status(202).json({ source });
   } catch (err) {
+    if (isRunningImportConflict(err)) return res.status(429).json({ error: RUNNING_IMPORT_MESSAGE });
     console.error('[catalog] create source error:', err.message);
     return res.status(500).json({ error: 'Failed to start the import.' });
   }
@@ -188,6 +196,7 @@ router.post('/sources/:sid/resync', acceptFile, async (req, res) => {
     startIngest(source.id, payload);
     return res.status(202).json({ source: updated });
   } catch (err) {
+    if (isRunningImportConflict(err)) return res.status(429).json({ error: RUNNING_IMPORT_MESSAGE });
     console.error('[catalog] resync error:', err.message);
     return res.status(500).json({ error: 'Failed to start the re-sync.' });
   }

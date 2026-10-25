@@ -52,9 +52,18 @@ function installOpenAIStub() {
     const url = typeof input === 'string' ? input : input.url;
     if (!url.startsWith('https://api.openai.com/')) return realFetch(input, init);
 
-    const path = new URL(url).pathname;
-    const body = init.body ? JSON.parse(init.body) : null;
-    requests.push({ path, body });
+    const path    = new URL(url).pathname;
+    const body    = init.body ? JSON.parse(init.body) : null;
+    const headers = { ...(init.headers ?? {}) };
+    requests.push({ path, body, headers, method: init.method ?? 'GET' });
+
+    // Key check: 'sk-bad…' is rejected, 'sk-down…' simulates an OpenAI outage
+    if (path === '/v1/models') {
+      const key = String(headers.Authorization ?? '').replace(/^Bearer /, '');
+      if (key.startsWith('sk-bad')) return jsonResponse(401, { error: { message: 'Incorrect API key provided' } });
+      if (key.startsWith('sk-down')) return jsonResponse(500, { error: { message: 'server error' } });
+      return jsonResponse(200, { object: 'list', data: [{ id: 'gpt-4o-mini' }] });
+    }
 
     if (path === '/v1/embeddings') {
       if (embedDelayMs) await new Promise((r) => setTimeout(r, embedDelayMs));

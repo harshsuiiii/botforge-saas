@@ -6,7 +6,7 @@ const express  = require('express');
 const passport = require('passport');
 
 const { router: googleAuthRouter } = require('./auth/google');
-const openaiOAuthRouter = require('./auth/openai-oauth');
+const openaiKeyRouter = require('./auth/openai-key');
 const { router: openaiRouter } = require('./auth/openai-project');
 const botsRouter      = require('./bots/bots');
 const analyticsRouter = require('./analytics/analytics');
@@ -40,7 +40,7 @@ app.get('/health', (_req, res) => {
 });
 
 app.use('/auth', googleAuthRouter);
-app.use('/auth', openaiOAuthRouter);
+app.use('/auth', openaiKeyRouter);
 app.use('/openai', openaiRouter);
 app.use('/api/bots/:id/catalog', catalogRouter);
 app.use('/api/bots', botsRouter);

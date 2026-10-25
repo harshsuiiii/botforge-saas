@@ -1,10 +1,9 @@
-import { useEffect, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
-import { API_URL } from '../config/api';
-import { useAuth } from '../context/AuthContext';
+import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useApi } from '../hooks/useApi';
 import TagInput from '../components/TagInput';
 import EmbedSnippet from '../components/EmbedSnippet';
+import OpenAIKeyForm from '../components/OpenAIKeyForm';
 
 const PERSONALITIES = [
   { id: 'friendly', label: 'Friendly', emoji: '😊', desc: 'Warm and approachable' },
@@ -30,9 +29,7 @@ function StepIndicator({ step }) {
 
 export default function Onboarding() {
   const [step, setStep] = useState(1);
-  const [searchParams] = useSearchParams();
   const navigate = useNavigate();
-  const { token } = useAuth();
   const { apiJson } = useApi();
 
   const [openaiConnected, setOpenaiConnected] = useState(false);
@@ -48,23 +45,6 @@ export default function Onboarding() {
   const [blockTopics, setBlockTopics] = useState([]);
   const [botId, setBotId] = useState(null);
   const [embedSnippet, setEmbedSnippet] = useState('');
-
-  useEffect(() => {
-    const openai = searchParams.get('openai');
-    if (openai === 'connected') setOpenaiConnected(true);
-    if (openai === 'error') setError('OpenAI connection failed. Please try again.');
-  }, [searchParams]);
-
-  useEffect(() => {
-    if (!token) return;
-    apiJson('/auth/openai/status')
-      .then((data) => { if (data.connected) setOpenaiConnected(true); })
-      .catch(() => {});
-  }, [token, apiJson]);
-
-  function connectOpenAI() {
-    window.location.href = `${API_URL}/auth/openai?token=${encodeURIComponent(token)}`;
-  }
 
   async function handleStep2Continue() {
     setSaving(true);
@@ -146,26 +126,11 @@ export default function Onboarding() {
           <div className="bg-white rounded-2xl shadow-xl border border-slate-200 p-8">
             <h2 className="text-2xl font-bold text-slate-900">Connect OpenAI</h2>
             <p className="mt-2 text-slate-500 text-sm">
-              Link your OpenAI account so your bot can respond to visitors.
+              Add your OpenAI API key so your bot can respond to visitors. Usage is billed to your OpenAI account.
             </p>
 
             <div className="mt-6 p-4 border border-slate-200 rounded-xl">
-              {openaiConnected ? (
-                <div className="flex items-center gap-3 text-emerald-600">
-                  <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                  </svg>
-                  <span className="font-semibold">Connected</span>
-                </div>
-              ) : (
-                <button
-                  type="button"
-                  onClick={connectOpenAI}
-                  className="px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-medium rounded-lg transition-colors"
-                >
-                  Connect OpenAI Account
-                </button>
-              )}
+              <OpenAIKeyForm onChange={(status) => setOpenaiConnected(status.connected)} />
             </div>
 
             <div className="mt-6">

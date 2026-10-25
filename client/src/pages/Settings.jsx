@@ -3,6 +3,7 @@ import { useApi } from '../hooks/useApi';
 import BotSelector from '../components/BotSelector';
 import TagInput from '../components/TagInput';
 import EmbedSnippet from '../components/EmbedSnippet';
+import OpenAIKeyForm from '../components/OpenAIKeyForm';
 
 const DEFAULT_FALLBACK_MESSAGE = "I'm sorry, I couldn't find that in our catalog. Please contact us for help.";
 
@@ -133,6 +134,7 @@ export default function Settings() {
       ) : !botId ? (
         <p className="text-slate-500">No bots found. Complete onboarding first.</p>
       ) : (
+        <>
         <form onSubmit={handleSave} className="space-y-6">
           <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6 space-y-5">
             <div>
@@ -257,6 +259,12 @@ export default function Settings() {
             <EmbedSnippet snippet={embedSnippet} />
           </div>
         </form>
+
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6 mt-6">
+          <h2 className="font-semibold text-slate-800 mb-4">OpenAI</h2>
+          <OpenAIKeyForm allowDisconnect />
+        </div>
+        </>
       )}
     </div>
   );

@@ -143,3 +143,9 @@ test('searchInfo returns at most 4 chunks for this bot', async () => {
   assert.deepEqual(Object.keys(results[0]).sort(), ['content', 'id', 'score', 'similarity', 'title', 'url']);
   assert.deepEqual(await search.searchInfo(botB, 'shipping', fakeEmbedding('shipping')), []);
 });
+
+test('in_stock accepts common spellings from the model', () => {
+  for (const v of ['Yes', 'TRUE', 'true', 1, '1', true]) assert.equal(search.sanitizeFilters({ query: 'x', in_stock: v }).in_stock, true, String(v));
+  for (const v of ['No', 'FALSE', 0, '0', false]) assert.equal(search.sanitizeFilters({ query: 'x', in_stock: v }).in_stock, false, String(v));
+  assert.equal(search.sanitizeFilters({ query: 'x', in_stock: 'maybe' }).in_stock, null);
+});

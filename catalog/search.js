@@ -32,8 +32,9 @@ function toPrice(value) {
 }
 
 function toBool(value) {
-  if (value === true || value === 'true' || value === 'yes') return true;
-  if (value === false || value === 'false' || value === 'no') return false;
+  const text = String(value ?? '').trim().toLowerCase();
+  if (value === true || value === 1 || ['true', 'yes', '1'].includes(text)) return true;
+  if (value === false || value === 0 || ['false', 'no', '0'].includes(text)) return false;
   return null;
 }
 

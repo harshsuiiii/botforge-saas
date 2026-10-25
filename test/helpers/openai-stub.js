@@ -28,13 +28,25 @@ function jsonResponse(status, body) {
   });
 }
 
-/** Stream each SSE event as its own chunk so consumers must handle partial reads. */
-function sseResponse(status, payloads) {
+/**
+ * Stream each SSE event as its own chunk so consumers must handle partial
+ * reads. With chunkBytes, the byte stream is instead cut every N bytes —
+ * mid-line and mid-character.
+ */
+function sseResponse(status, payloads, chunkBytes = 0) {
   const encoder = new TextEncoder();
   const events  = [...payloads, '[DONE]'].map((d) => `data: ${d}\n\n`);
+  const chunks  = chunkBytes
+    ? (() => {
+      const bytes = encoder.encode(events.join(''));
+      const out = [];
+      for (let i = 0; i < bytes.length; i += chunkBytes) out.push(bytes.slice(i, i + chunkBytes));
+      return out;
+    })()
+    : events.map((e) => encoder.encode(e));
   const body = new ReadableStream({
     start(controller) {
-      for (const e of events) controller.enqueue(encoder.encode(e));
+      for (const c of chunks) controller.enqueue(c);
       controller.close();
     },
   });
@@ -79,7 +91,7 @@ function installOpenAIStub() {
       const reply = chatQueue.shift();
       if (!reply) throw new Error('OpenAI stub: no queued chat reply');
       const status = reply.status ?? 200;
-      return reply.sse ? sseResponse(status, reply.sse) : jsonResponse(status, reply.json ?? {});
+      return reply.sse ? sseResponse(status, reply.sse, reply.chunkBytes) : jsonResponse(status, reply.json ?? {});
     }
 
     return jsonResponse(404, { error: { message: `OpenAI stub: unknown path ${path}` } });

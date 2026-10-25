@@ -615,7 +615,10 @@ router.post('/', async (req, res) => {
     let result = await readCompletion(res, openaiResponse);
     assistantReply += result.text;
 
-    for (let round = 1; useCatalog && result.finishReason === 'tool_calls' && result.toolCalls.length; round++) {
+    // Hard cap: never more than MAX_TOOL_ROUNDS, even if the model ignores tool_choice 'none'
+    for (let round = 1;
+      useCatalog && round <= MAX_TOOL_ROUNDS && result.finishReason === 'tool_calls' && result.toolCalls.length;
+      round++) {
       const calls = result.toolCalls;
       openaiMessages.push({
         role      : 'assistant',
@@ -624,13 +627,17 @@ router.post('/', async (req, res) => {
       });
 
       const outcomes = await Promise.all(calls.map((call, i) => (i < MAX_TOOL_CALLS_PER_ROUND
-        ? runToolCall(bot.id, openaiToken, call)
+        ? runToolCall(bot.id, openaiToken, call, { projectId: bot.openai_project_id ?? null })
         : { content: JSON.stringify({ error: 'too many calls' }), cards: [], searched: false, resultCount: 0 })));
 
       outcomes.forEach((outcome, i) => {
         openaiMessages.push({ role: 'tool', tool_call_id: calls[i].id, content: outcome.content });
         if (outcome.searched) searchCounts.push(outcome.resultCount);
-        for (const card of outcome.cards) if (!cards.has(card.id)) cards.set(card.id, card);
+        // the same product imported from two sources shows once
+        for (const card of outcome.cards) {
+          const key = `${String(card.name).toLowerCase()}|${card.price}`;
+          if (!cards.has(key)) cards.set(key, card);
+        }
       });
 
       result = await streamCompletion(res, openaiToken, callOptions(round >= MAX_TOOL_ROUNDS ? 'none' : 'auto'));

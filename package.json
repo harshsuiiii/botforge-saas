@@ -11,7 +11,7 @@
     "test": "node --test \"test/**/*.test.js\""
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20.18.1"
   },
   "dependencies": {
     "cheerio": "^1.2.0",

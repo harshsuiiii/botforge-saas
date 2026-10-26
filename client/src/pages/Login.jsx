@@ -1,7 +1,13 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { API_URL } from '../config/api';
 import { useAuth } from '../context/AuthContext';
+import { completeSignIn } from '../config/signIn';
+
+const ERROR_MESSAGES = {
+  auth_failed: 'Authentication failed. Please try again.',
+  google_not_configured: 'Google sign-in is not set up yet: add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to the server .env.',
+};
 
 function BotForgeLogo({ large = false }) {
   return (
@@ -17,19 +23,42 @@ function BotForgeLogo({ large = false }) {
 }
 
 export default function Login() {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, login } = useAuth();
   const navigate = useNavigate();
   const [params] = useSearchParams();
+  const [devLogin, setDevLogin] = useState(false);
+  const [devError, setDevError] = useState(null);
 
   useEffect(() => {
     if (isAuthenticated) navigate('/dashboard', { replace: true });
   }, [isAuthenticated, navigate]);
 
+  // Local development only: the API reports whether DEV_LOGIN is on
+  useEffect(() => {
+    fetch(`${API_URL}/auth/dev-login`)
+      .then((res) => (res.ok ? res.json() : { enabled: false }))
+      .then((data) => setDevLogin(!!data.enabled))
+      .catch(() => setDevLogin(false));
+  }, []);
+
   function signIn() {
     window.location.href = `${API_URL}/auth/google`;
   }
 
-  const error = params.get('error');
+  async function signInAsDev() {
+    setDevError(null);
+    try {
+      const res = await fetch(`${API_URL}/auth/dev-login`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Dev sign-in is not available.');
+      await completeSignIn(data.code, login, navigate);
+    } catch (err) {
+      setDevError(err.message);
+    }
+  }
+
+  const errorKey = params.get('error');
+  const error = errorKey ? (ERROR_MESSAGES[errorKey] ?? ERROR_MESSAGES.auth_failed) : null;
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-indigo-50 via-white to-slate-100 px-4">
@@ -42,7 +71,7 @@ export default function Login() {
 
         {error && (
           <p className="mt-4 text-sm text-red-600 bg-red-50 rounded-lg py-2 px-3">
-            Authentication failed. Please try again.
+            {error}
           </p>
         )}
 
@@ -59,6 +88,20 @@ export default function Login() {
           </svg>
           Sign in with Google
         </button>
+
+        {devLogin && (
+          <div className="mt-6 pt-6 border-t border-dashed border-slate-200">
+            <button
+              type="button"
+              onClick={signInAsDev}
+              className="w-full px-4 py-2.5 border border-amber-300 bg-amber-50 text-amber-800 rounded-lg hover:bg-amber-100 transition-colors text-sm font-medium"
+            >
+              Continue as dev user
+            </button>
+            <p className="mt-2 text-xs text-slate-500">Local development only (DEV_LOGIN=true).</p>
+            {devError && <p className="mt-2 text-sm text-red-600">{devError}</p>}
+          </div>
+        )}
       </div>
     </div>
   );

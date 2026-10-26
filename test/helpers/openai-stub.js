@@ -28,13 +28,25 @@ function jsonResponse(status, body) {
   });
 }
 
-/** Stream each SSE event as its own chunk so consumers must handle partial reads. */
-function sseResponse(status, payloads) {
+/**
+ * Stream each SSE event as its own chunk so consumers must handle partial
+ * reads. With chunkBytes, the byte stream is instead cut every N bytes —
+ * mid-line and mid-character.
+ */
+function sseResponse(status, payloads, chunkBytes = 0) {
   const encoder = new TextEncoder();
   const events  = [...payloads, '[DONE]'].map((d) => `data: ${d}\n\n`);
+  const chunks  = chunkBytes
+    ? (() => {
+      const bytes = encoder.encode(events.join(''));
+      const out = [];
+      for (let i = 0; i < bytes.length; i += chunkBytes) out.push(bytes.slice(i, i + chunkBytes));
+      return out;
+    })()
+    : events.map((e) => encoder.encode(e));
   const body = new ReadableStream({
     start(controller) {
-      for (const e of events) controller.enqueue(encoder.encode(e));
+      for (const c of chunks) controller.enqueue(c);
       controller.close();
     },
   });
@@ -46,16 +58,27 @@ function installOpenAIStub() {
   const requests  = [];
   const chatQueue = [];
   let failEmbeddings = false;
+  let embedDelayMs = 0;
 
   globalThis.fetch = async (input, init = {}) => {
     const url = typeof input === 'string' ? input : input.url;
     if (!url.startsWith('https://api.openai.com/')) return realFetch(input, init);
 
-    const path = new URL(url).pathname;
-    const body = init.body ? JSON.parse(init.body) : null;
-    requests.push({ path, body });
+    const path    = new URL(url).pathname;
+    const body    = init.body ? JSON.parse(init.body) : null;
+    const headers = { ...(init.headers ?? {}) };
+    requests.push({ path, body, headers, method: init.method ?? 'GET' });
+
+    // Key check: 'sk-bad…' is rejected, 'sk-down…' simulates an OpenAI outage
+    if (path === '/v1/models') {
+      const key = String(headers.Authorization ?? '').replace(/^Bearer /, '');
+      if (key.startsWith('sk-bad')) return jsonResponse(401, { error: { message: 'Incorrect API key provided' } });
+      if (key.startsWith('sk-down')) return jsonResponse(500, { error: { message: 'server error' } });
+      return jsonResponse(200, { object: 'list', data: [{ id: 'gpt-4o-mini' }] });
+    }
 
     if (path === '/v1/embeddings') {
+      if (embedDelayMs) await new Promise((r) => setTimeout(r, embedDelayMs));
       if (failEmbeddings) return jsonResponse(500, { error: { message: 'stub embeddings failure' } });
       const inputs = Array.isArray(body.input) ? body.input : [body.input];
       return jsonResponse(200, {
@@ -68,7 +91,7 @@ function installOpenAIStub() {
       const reply = chatQueue.shift();
       if (!reply) throw new Error('OpenAI stub: no queued chat reply');
       const status = reply.status ?? 200;
-      return reply.sse ? sseResponse(status, reply.sse) : jsonResponse(status, reply.json ?? {});
+      return reply.sse ? sseResponse(status, reply.sse, reply.chunkBytes) : jsonResponse(status, reply.json ?? {});
     }
 
     return jsonResponse(404, { error: { message: `OpenAI stub: unknown path ${path}` } });
@@ -78,6 +101,7 @@ function installOpenAIStub() {
     requests,
     queueChat(reply) { chatQueue.push(reply); },
     failEmbeddings(on) { failEmbeddings = on; },
+    delayEmbeddings(ms) { embedDelayMs = ms; },
     restore() { globalThis.fetch = realFetch; },
   };
 }

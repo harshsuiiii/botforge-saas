@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useApi } from '../hooks/useApi';
+import { useBots } from '../hooks/useBots';
 import BotSelector from '../components/BotSelector';
 import EmptyState from '../components/EmptyState';
 import { formatPrice, safeHttpUrl } from '../components/ProductCard';
@@ -41,15 +42,13 @@ export default function Catalog() {
   const resyncInputRef = useRef(null);
   const resyncTarget = useRef(null);
 
+  const { bots, loading: loadingBots } = useBots();
+  const [pollRetry, setPollRetry] = useState(0);
+
   // Default to the user's first bot, like Settings
   useEffect(() => {
-    apiJson('/api/bots')
-      .then((data) => {
-        const bots = data.bots || [];
-        if (bots.length && !botId) setBotId(bots[0].id);
-      })
-      .catch(() => {});
-  }, [apiJson, botId]);
+    if (bots.length && !botId) setBotId(bots[0].id);
+  }, [bots, botId]);
 
   const loadSources = useCallback(async () => {
     if (!botId) return;
@@ -58,6 +57,7 @@ export default function Catalog() {
       setSources(data.sources || []);
     } catch (err) {
       setBanner({ type: 'error', text: err.message });
+      setPollRetry((n) => n + 1); // re-arm polling even though sources didn't change
     }
   }, [apiJson, botId]);
 
@@ -74,7 +74,7 @@ export default function Catalog() {
     if (!anyActive) return undefined;
     const timer = setTimeout(loadSources, POLL_MS);
     return () => clearTimeout(timer);
-  }, [anyActive, sources, loadSources]);
+  }, [anyActive, sources, pollRetry, loadSources]);
 
   // Debounce the product search box
   useEffect(() => {
@@ -196,7 +196,11 @@ export default function Catalog() {
         </div>
       )}
 
-      {!botId ? (
+      {!botId && loadingBots ? (
+        <div className="flex justify-center py-20">
+          <div className="w-8 h-8 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin" />
+        </div>
+      ) : !botId ? (
         <p className="text-slate-500">No bots found. Complete onboarding first.</p>
       ) : (
         <div className="space-y-6">

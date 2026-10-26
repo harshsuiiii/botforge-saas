@@ -80,6 +80,21 @@ test('reads the first XLSX worksheet', async () => {
   assert.deepEqual(products[0].attributes, { colour: 'Blue' });
 });
 
+test('reads link targets from XLSX hyperlink cells', async () => {
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet('Products');
+  ws.addRow(['Name', 'Link', 'Image']);
+  ws.addRow([
+    { text: 'Rain Jacket', hyperlink: 'https://shop.test/rain-jacket' },
+    { text: 'View', hyperlink: 'https://shop.test/p/1' },
+    { text: 'photo', hyperlink: 'https://shop.test/img/1.jpg' },
+  ]);
+  const { products } = await parseSpreadsheet(Buffer.from(await wb.xlsx.writeBuffer()), 'c.xlsx');
+  assert.equal(products[0].name, 'Rain Jacket');
+  assert.equal(products[0].url, 'https://shop.test/p/1');
+  assert.equal(products[0].image_url, 'https://shop.test/img/1.jpg');
+});
+
 test('rejects unsupported extensions', async () => {
   await assert.rejects(parseSpreadsheet(csv('a'), 'catalog.txt'), /Unsupported/);
 });

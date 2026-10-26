@@ -25,6 +25,13 @@ test('batches 250 texts into 100/100/50 and keeps order', async () => {
   assert.deepEqual(vectors[249], fakeEmbedding(texts[249]));
 });
 
+test('sends the OpenAI-Project header when given', async () => {
+  await embedTexts('sk-test', ['a'], { projectId: 'proj_123' });
+  assert.equal(stub.requests[0].headers['OpenAI-Project'], 'proj_123');
+  await embedTexts('sk-test', ['b']);
+  assert.equal(stub.requests[1].headers['OpenAI-Project'], undefined);
+});
+
 test('no request for an empty list', async () => {
   assert.deepEqual(await embedTexts('sk-test', []), []);
   assert.equal(stub.requests.length, 0);

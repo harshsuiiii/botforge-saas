@@ -38,6 +38,16 @@ test.before(async () => {
 
 test.after(() => stub.restore());
 
+test("bills catalog OpenAI calls to the bot's OpenAI project", async () => {
+  const { botId } = await seedBot(pool, { botFields: { openai_project_id: 'proj_shop' } });
+  const sourceId = await insertSource(botId);
+  const before = stub.requests.length;
+  await runIngest(sourceId, { buffer: csv('name,price\nCap,199\n'), filename: 'c.csv' });
+  const calls = stub.requests.slice(before).filter((r) => r.path === '/v1/embeddings');
+  assert.ok(calls.length > 0);
+  assert.ok(calls.every((r) => r.headers['OpenAI-Project'] === 'proj_shop'));
+});
+
 test('imports a spreadsheet and marks it ready', async () => {
   const { botId } = await seedBot(pool);
   const sourceId = await insertSource(botId);
@@ -160,9 +170,10 @@ test('imports a URL source through crawl and extraction', async () => {
 
 test('recovers interrupted imports', async () => {
   const { botId } = await seedBot(pool);
+  const { botId: otherBot } = await seedBot(pool); // one running import per bot
   await pool.query(`UPDATE catalog_sources SET status = 'ready' WHERE status IN ('pending', 'processing')`);
   const a = await insertSource(botId, 'spreadsheet', 'a.csv', 'pending');
-  const b = await insertSource(botId, 'spreadsheet', 'b.csv', 'processing');
+  const b = await insertSource(otherBot, 'spreadsheet', 'b.csv', 'processing');
   const c = await insertSource(botId, 'spreadsheet', 'c.csv', 'ready');
 
   assert.equal(await recoverInterruptedImports(), 2);

@@ -52,8 +52,55 @@ const { getOwnerToken } = require('../auth/token-crypto');
 const {
   TOOL_DEFINITIONS, DEFAULT_FALLBACK_MESSAGE, buildCatalogPrompt, runToolCall,
 } = require('../catalog/tools');
+const { createRateLimiter } = require('./rate-limit');
 
 const router = express.Router();
+
+// ─── Abuse limits (public endpoint; each message spends the owner's OpenAI credit) ─
+
+const visitorLimiter = createRateLimiter({ windowMs: 60 * 1000, max: 20 });        // per embed key + IP
+const botLimiter     = createRateLimiter({ windowMs: 60 * 60 * 1000, max: 600 });  // per embed key
+const RATE_LIMIT_MESSAGE = 'Too many messages. Please wait a moment and try again.';
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Hostname of an allowlist entry ('https://shop.com', 'shop.com'), or null if unparseable. */
+function allowlistHost(entry) {
+  try {
+    const text = String(entry).trim();
+    return new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(text) ? text : `https://${text}`).hostname.toLowerCase() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * With an empty allowlist every origin (or none) is allowed. With entries,
+ * the request must carry an Origin whose hostname matches an entry or one
+ * of its subdomains.
+ */
+function isOriginAllowed(origin, allowlist) {
+  if (!allowlist?.length) return true;
+  let host;
+  try {
+    host = new URL(origin).hostname.toLowerCase();
+  } catch {
+    return false; // missing, 'null' or malformed
+  }
+  return allowlist.map(allowlistHost).filter(Boolean)
+    .some((allowed) => host === allowed || host.endsWith(`.${allowed}`));
+}
+
+/**
+ * Reuse the visitor's session id only when it is a UUID that is new or
+ * already belongs to this bot; otherwise start a fresh session.
+ */
+async function resolveSessionId(requested, botId) {
+  const candidate = typeof requested === 'string' ? requested.trim() : '';
+  if (!UUID_RE.test(candidate)) return uuidv4();
+  const { rows } = await pool.query('SELECT bot_id FROM sessions WHERE session_id = $1', [candidate]);
+  return rows.length && rows[0].bot_id !== botId ? uuidv4() : candidate;
+}
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -419,6 +466,15 @@ router.post('/', async (req, res) => {
   const userMessage   = message.trim().slice(0, 4096); // hard cap
   const fingerprint   = buildFingerprint(req);
 
+  // ── Rate limits (checked before any database or OpenAI work) ──────────────
+  const perBot     = botLimiter.hit(embed_key);
+  const perVisitor = visitorLimiter.hit(`${embed_key}|${req.socket?.remoteAddress ?? 'unknown'}`);
+  if (!perBot.allowed || !perVisitor.allowed) {
+    res.setHeader('Retry-After', String(Math.max(perBot.allowed ? 0 : perBot.retryAfterSec,
+      perVisitor.allowed ? 0 : perVisitor.retryAfterSec)));
+    return res.status(429).json({ error: RATE_LIMIT_MESSAGE });
+  }
+
   // ── Step 1: resolve embed_key → bot ────────────────────────────────────────
   let bot;
   try {
@@ -436,20 +492,18 @@ router.post('/', async (req, res) => {
     return res.status(410).json({ error: 'This bot is no longer available.' });
   }
 
-  // Optional: enforce domain_allowlist
-  const origin = req.headers.origin;
-  if (bot.domain_allowlist?.length && origin) {
-    const allowed = bot.domain_allowlist.some((d) =>
-      origin === d || origin.endsWith(`.${new URL(d).hostname}`),
-    );
-    if (!allowed) {
-      return res.status(403).json({ error: 'Origin not allowed for this bot.' });
-    }
+  // Enforce domain_allowlist (requests without an Origin are refused when one is set)
+  if (!isOriginAllowed(req.headers.origin, bot.domain_allowlist)) {
+    return res.status(403).json({ error: 'Origin not allowed for this bot.' });
   }
 
-  const sessionId = (typeof session_id === 'string' && session_id.trim())
-    ? session_id.trim()
-    : uuidv4();
+  let sessionId;
+  try {
+    sessionId = await resolveSessionId(session_id, bot.id);
+  } catch (err) {
+    console.warn('[chat] Could not check session id:', err.message);
+    sessionId = uuidv4();
+  }
 
   // ── Step 2: load existing session history ───────────────────────────────────
   let storedMessages = [];
@@ -561,7 +615,10 @@ router.post('/', async (req, res) => {
     let result = await readCompletion(res, openaiResponse);
     assistantReply += result.text;
 
-    for (let round = 1; useCatalog && result.finishReason === 'tool_calls' && result.toolCalls.length; round++) {
+    // Hard cap: never more than MAX_TOOL_ROUNDS, even if the model ignores tool_choice 'none'
+    for (let round = 1;
+      useCatalog && round <= MAX_TOOL_ROUNDS && result.finishReason === 'tool_calls' && result.toolCalls.length;
+      round++) {
       const calls = result.toolCalls;
       openaiMessages.push({
         role      : 'assistant',
@@ -570,13 +627,17 @@ router.post('/', async (req, res) => {
       });
 
       const outcomes = await Promise.all(calls.map((call, i) => (i < MAX_TOOL_CALLS_PER_ROUND
-        ? runToolCall(bot.id, openaiToken, call)
+        ? runToolCall(bot.id, openaiToken, call, { projectId: bot.openai_project_id ?? null })
         : { content: JSON.stringify({ error: 'too many calls' }), cards: [], searched: false, resultCount: 0 })));
 
       outcomes.forEach((outcome, i) => {
         openaiMessages.push({ role: 'tool', tool_call_id: calls[i].id, content: outcome.content });
         if (outcome.searched) searchCounts.push(outcome.resultCount);
-        for (const card of outcome.cards) if (!cards.has(card.id)) cards.set(card.id, card);
+        // the same product imported from two sources shows once
+        for (const card of outcome.cards) {
+          const key = `${String(card.name).toLowerCase()}|${card.price}`;
+          if (!cards.has(key)) cards.set(key, card);
+        }
       });
 
       result = await streamCompletion(res, openaiToken, callOptions(round >= MAX_TOOL_ROUNDS ? 'none' : 'auto'));
@@ -633,5 +694,12 @@ router.post('/', async (req, res) => {
     }
   });
 });
+
+/** Test hook: clear rate-limit windows between test cases. */
+router.resetRateLimits = () => {
+  visitorLimiter.reset();
+  botLimiter.reset();
+};
+router.isOriginAllowed = isOriginAllowed;
 
 module.exports = router;

@@ -23,7 +23,7 @@ The backend modules are organized as follows:
 | Path | Responsibility |
 | --- | --- |
 | `server.js` | Express application, CORS, route registration, static widget hosting |
-| `auth/` | Google OAuth, OpenAI OAuth, JWT verification, PostgreSQL pool |
+| `auth/` | Google OAuth + login codes, dev sign-in, OpenAI API keys, JWT verification, PostgreSQL pool |
 | `bots/` | Authenticated chatbot CRUD and embed-key management |
 | `chat/` | Public widget chat endpoint, topic checks, OpenAI streaming, sessions |
 | `analytics/` | Authenticated dashboard metrics and session-log APIs |
@@ -33,10 +33,10 @@ The backend modules are organized as follows:
 
 ## Prerequisites
 
-- Node.js 18 or later
-- PostgreSQL 15 or later
-- Google OAuth credentials
-- OpenAI OAuth credentials and an OpenAI account/API authorization suitable for the configured model
+- Node.js 20.18.1 or later (21+ to run the tests)
+- PostgreSQL 15 or later with the pgvector extension (or Docker, see below)
+- Google OAuth credentials for sign-in (optional locally: see `DEV_LOGIN`)
+- Each bot owner needs an OpenAI API key; they paste it in onboarding or Settings
 
 ## Local setup
 
@@ -52,7 +52,13 @@ The backend modules are organized as follows:
    npm install --prefix client
    ```
 
-3. Create a database and apply the base schema, then migrations in numeric order:
+3. Create a database. Locally, Docker gives you Postgres with pgvector (use the user, password and database name from your `DATABASE_URL`):
+
+   ```bash
+   docker run -d --name botforge-postgres --restart unless-stopped -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=<password> -e POSTGRES_DB=botforge -p 5432:5432 -v botforge-pgdata:/var/lib/postgresql/data pgvector/pgvector:pg16
+   ```
+
+   Then apply the base schema and migrations in numeric order:
 
    ```bash
    psql "$DATABASE_URL" -f schema.sql
@@ -60,16 +66,14 @@ The backend modules are organized as follows:
    psql "$DATABASE_URL" -f migrations/003_users_default_spend_cap.sql
    psql "$DATABASE_URL" -f migrations/004_embed_configs_unique_bot.sql
    psql "$DATABASE_URL" -f migrations/005_catalog.sql
+   psql "$DATABASE_URL" -f migrations/006_unique_tokens_and_running_imports.sql
    ```
 
    Migration 005 runs `CREATE EXTENSION vector` (pgvector), which needs database-owner rights. Hosted Postgres such as Supabase, Neon, or RDS supports it.
 
 4. Copy `.env.example` to `.env` and replace every placeholder. Do not commit `.env`.
 
-5. Configure OAuth redirect URIs to match your local values:
-
-   - Google: `http://localhost:3000/auth/google/callback`
-   - OpenAI: `http://localhost:3000/auth/openai/callback`
+5. Create a Google OAuth client (Web application) and add the redirect URI `http://localhost:3000/auth/google/callback`. Until you have one, set `DEV_LOGIN=true` to use **Continue as dev user** on the login page (localhost only, never in production).
 
 6. Start the API and dashboard in separate terminals:
 
@@ -87,10 +91,10 @@ The backend modules are organized as follows:
 | `DATABASE_URL` | PostgreSQL connection string |
 | `JWT_SECRET` | Secret used to sign dashboard JWTs |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_CALLBACK_URL` | Google OAuth configuration |
-| `OPENAI_CLIENT_ID`, `OPENAI_CLIENT_SECRET`, `OPENAI_CALLBACK_URL` | OpenAI OAuth configuration |
-| `TOKEN_ENCRYPTION_KEY` | 64-character hexadecimal AES-256-GCM encryption key |
+| `TOKEN_ENCRYPTION_KEY` | 64-character hexadecimal AES-256-GCM key for stored OpenAI API keys |
 | `FRONTEND_URL` | Dashboard origin for CORS and OAuth redirects |
 | `NODE_ENV`, `PORT` | Runtime environment and API port |
+| `DEV_LOGIN` | `true` shows a localhost-only "Continue as dev user" button (ignored in production) |
 
 Use `openssl rand -hex 32` or Node's `crypto.randomBytes(32).toString('hex')` to generate `TOKEN_ENCRYPTION_KEY`.
 
@@ -98,11 +102,11 @@ Use `openssl rand -hex 32` or Node's `crypto.randomBytes(32).toString('hex')` to
 
 This project is a strong MVP foundation, but the following should be completed before public production traffic:
 
-- Add rate limiting, bot/tenant quotas, abuse controls, and strict origin allowlist enforcement to `/chat`.
-- Enforce per-bot spend limits before calling OpenAI; the database field alone does not stop usage.
-- Replace JWT-in-URL OAuth flow with short-lived, server-side, single-use OAuth state; avoid storing long-lived browser tokens in `localStorage`.
+- `/chat` rate limits and login codes live in process memory; use a shared store (e.g. Redis) before running more than one API instance, and set Express `trust proxy` behind a reverse proxy so limits see real client IPs.
+- Add bot/tenant quotas and enforce per-bot spend limits before calling OpenAI; the database field alone does not stop usage.
+- Add CSRF protection to the Google OAuth `state`, and avoid storing long-lived browser tokens in `localStorage`.
 - Establish transcript retention/deletion policies and cap conversation history sent to the model.
-- Add TLS/reverse-proxy configuration, security headers, structured observability, backups with restore tests, CI, and automated tests.
+- Add TLS/reverse-proxy configuration, security headers, structured observability, backups with restore tests, and CI (the `npm test` suite exists).
 
 ## Scripts
 

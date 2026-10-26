@@ -50,14 +50,20 @@ function stripUnitSuffix(key) {
   return key.replace(/\s*[([].*?[)\]]\s*$/, '');
 }
 
-/** Map one row ({ header: value }) onto the raw product shape. */
-function rowToRaw(row) {
+const LINK_FIELDS = new Set(['url', 'image_url']);
+
+/**
+ * Map one row ({ header: value }) onto the raw product shape.
+ * links holds XLSX hyperlink targets by header; URL columns prefer the target
+ * over the display text (often just "View").
+ */
+function rowToRaw(row, links = {}) {
   const raw = { attributes: {} };
   for (const [header, value] of Object.entries(row)) {
     const key = normalizeHeader(header);
     if (!key) continue;
     const field = HEADER_ALIASES[key] ?? HEADER_ALIASES[stripUnitSuffix(key)];
-    if (field) raw[field] = value;
+    if (field) raw[field] = LINK_FIELDS.has(field) && links[header] ? links[header] : value;
     else raw.attributes[key] = value;
   }
   return raw;
@@ -83,14 +89,19 @@ async function readXlsxRows(buffer) {
   let headers = null;
   const rows = [];
   sheet.eachRow({ includeEmpty: false }, (row) => {
-    const values = row.values.slice(1).map(cellToValue); // ExcelJS rows are 1-indexed
+    const cells  = row.values.slice(1);                 // ExcelJS rows are 1-indexed
+    const values = cells.map(cellToValue);
     if (!headers) {
       headers = values.map((v) => String(v ?? ''));
       return;
     }
     const record = {};
-    headers.forEach((h, i) => { record[h] = values[i] ?? null; });
-    rows.push(record);
+    const links  = {};
+    headers.forEach((h, i) => {
+      record[h] = values[i] ?? null;
+      if (cells[i] && typeof cells[i] === 'object' && cells[i].hyperlink) links[h] = cells[i].hyperlink;
+    });
+    rows.push({ record, links });
   });
   return rows;
 }
@@ -113,14 +124,14 @@ function readCsvRows(buffer) {
 async function parseSpreadsheet(buffer, filename) {
   const ext = path.extname(filename ?? '').toLowerCase();
   let rows;
-  if (ext === '.csv') rows = readCsvRows(buffer);
+  if (ext === '.csv') rows = readCsvRows(buffer).map((record) => ({ record, links: {} }));
   else if (ext === '.xlsx') rows = await readXlsxRows(buffer);
   else throw new Error(`Unsupported spreadsheet type: ${ext || 'unknown'}`);
 
   const products = [];
   let skipped = 0;
-  for (const row of rows) {
-    const product = normalizeProduct(rowToRaw(row));
+  for (const { record, links } of rows) {
+    const product = normalizeProduct(rowToRaw(record, links));
     if (product) products.push(product);
     else skipped += 1;
   }

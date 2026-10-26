@@ -45,15 +45,34 @@ async function readLimited(res, maxBytes) {
   return Buffer.concat(chunks).toString('utf8');
 }
 
+const BLOCK_ELEMENTS = 'p, div, li, h1, h2, h3, h4, h5, h6, tr, section, article, header, main, aside, ul, ol, table, blockquote, dd, dt, pre';
+
+/**
+ * Visible page text with paragraph breaks kept, so extraction windows split
+ * between products instead of mid-sentence.
+ */
+function pageText($) {
+  $('script, style, noscript, nav, footer').remove();
+  $('br').replaceWith('\n');
+  $(BLOCK_ELEMENTS).each((_, el) => { $(el).prepend('\n\n').append('\n\n'); });
+  return $('body').text()
+    .replace(/[ \t\f\v\r]+/g, ' ')
+    .replace(/ *\n */g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 /**
  * Fetch one URL, following redirects manually and guarding every hop.
+ * When lockedHost is set, a redirect to any other hostname skips the page.
  * @returns {Promise<{ url: string, html: string } | null>} null when the page is skipped
  */
-async function fetchPage(url, { guard, fetchImpl, timeoutMs, maxBytes, maxRedirects }) {
+async function fetchPage(url, { guard, fetchImpl, timeoutMs, maxBytes, maxRedirects }, lockedHost = null) {
   let current = url;
   const signal = AbortSignal.timeout(timeoutMs);
 
   for (let hop = 0; hop <= maxRedirects; hop++) {
+    if (lockedHost && new URL(current).hostname !== lockedHost) return null;
     await guard(current);
 
     const res = await fetchImpl(current, {
@@ -84,20 +103,23 @@ async function fetchPage(url, { guard, fetchImpl, timeoutMs, maxBytes, maxRedire
 /**
  * @param {string} startUrl
  * @param {{ guard?: Function, fetchImpl?: Function, maxPages?: number, maxDepth?: number,
- *           timeoutMs?: number, maxBytes?: number, maxRedirects?: number }} opts
+ *           timeoutMs?: number, maxBytes?: number, maxRedirects?: number,
+ *           maxDurationMs?: number }} opts
  * @returns {Promise<Array<{ url: string, text: string }>>}
  */
 async function crawlSite(startUrl, opts = {}) {
   const options = {
-    guard       : assertPublicUrl,
-    fetchImpl   : guardedFetch,   // re-checks DNS at connect time (rebinding)
-    maxPages    : 50,
-    maxDepth    : 2,
-    timeoutMs   : 10000,
-    maxBytes    : 2 * 1024 * 1024,
-    maxRedirects: 5,
+    guard        : assertPublicUrl,
+    fetchImpl    : guardedFetch,   // re-checks DNS at connect time (rebinding)
+    maxPages     : 50,
+    maxDepth     : 2,
+    timeoutMs    : 10000,
+    maxBytes     : 2 * 1024 * 1024,
+    maxRedirects : 5,
+    maxDurationMs: 5 * 60 * 1000,   // whole crawl; the bot's import lock is held meanwhile
     ...opts,
   };
+  const startedAt = Date.now();
 
   // A blocked or invalid start URL is an error the owner should see.
   await options.guard(startUrl);
@@ -109,13 +131,15 @@ async function crawlSite(startUrl, opts = {}) {
   const pages = [];
   let attempts = 0;
 
-  while (queue.length && pages.length < options.maxPages && attempts < options.maxPages * 3) {
+  while (queue.length && pages.length < options.maxPages && attempts < options.maxPages * 3
+         && Date.now() - startedAt < options.maxDurationMs) {
     const { url, depth } = queue.shift();
     attempts += 1;
 
     let fetched;
     try {
-      fetched = await fetchPage(url, options);
+      // only the start URL may redirect to another hostname (shop.com → www.shop.com)
+      fetched = await fetchPage(url, options, attempts === 1 ? null : host);
     } catch {
       fetched = null; // guard rejection, timeout or network error: skip this page
     }
@@ -126,8 +150,7 @@ async function crawlSite(startUrl, opts = {}) {
 
     seen.add(stripHash(fetched.url));
     const $ = cheerio.load(fetched.html);
-    $('script, style, noscript, nav, footer').remove();
-    const text = $('body').text().replace(/\s+/g, ' ').trim();
+    const text = pageText($);
     if (text) pages.push({ url: fetched.url, text });
 
     if (depth >= options.maxDepth) continue;

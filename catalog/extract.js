@@ -108,7 +108,12 @@ function pairsToObject(pairs) {
   return out;
 }
 
-async function extractWindow(token, text) {
+/**
+ * Extract one window. Returns null when the model refused, was cut off or
+ * returned unparseable JSON — the caller skips that window. OpenAI HTTP
+ * errors (bad key, quota, outage) still throw and fail the import.
+ */
+async function extractWindow(token, text, opts) {
   const data = await openaiJson(token, '/chat/completions', {
     model          : EXTRACTION_MODEL,
     temperature    : 0,
@@ -120,33 +125,60 @@ async function extractWindow(token, text) {
       { role: 'system', content: SYSTEM_PROMPT },
       { role: 'user',   content: text },
     ],
-  });
+  }, opts);
 
-  const content = data?.choices?.[0]?.message?.content ?? '{}';
-  const parsed  = JSON.parse(content);
+  const choice = data?.choices?.[0];
+  if (!choice?.message || choice.message.refusal || choice.finish_reason === 'length') return null;
+
+  let parsed;
+  try {
+    parsed = JSON.parse(choice.message.content ?? '');
+  } catch {
+    return null;
+  }
   return {
-    products: Array.isArray(parsed.products) ? parsed.products : [],
-    info    : Array.isArray(parsed.info) ? parsed.info : [],
+    products: Array.isArray(parsed?.products) ? parsed.products : [],
+    info    : Array.isArray(parsed?.info) ? parsed.info : [],
   };
+}
+
+/** Resolve '/p/1' or 'img/a.jpg' against the page the text came from. */
+function absoluteUrl(value, pageUrl) {
+  if (!value || !pageUrl) return value ?? null;
+  try {
+    return new URL(value, pageUrl).href;
+  } catch {
+    return value;
+  }
 }
 
 /**
  * @param {string} token
  * @param {Array<{ url: string|null, text: string }>} pages
+ * @param {{ projectId?: string|null }} opts – the bot's OpenAI project, if any
  * @returns {Promise<{ products: object[], info: Array<{ title, content, url }> }>}
  */
-async function extractCatalog(token, pages) {
+async function extractCatalog(token, pages, opts = {}) {
   const products = [];
   const info = [];
+  let windows = 0;
+  let failed = 0;
 
   for (const page of pages) {
     for (const window of splitIntoWindows(page.text)) {
-      const result = await extractWindow(token, window);
+      windows += 1;
+      const result = await extractWindow(token, window, opts);
+      if (!result) {
+        failed += 1;
+        console.warn(`[extract] skipped an unreadable window from ${page.url ?? 'PDF'}`);
+        continue;
+      }
 
       for (const raw of result.products) {
         const product = normalizeProduct({
           ...raw,
-          url       : raw.url ?? page.url,
+          url       : absoluteUrl(raw.url, page.url) ?? page.url,
+          image_url : absoluteUrl(raw.image_url, page.url),
           attributes: pairsToObject(raw.attributes),
         });
         if (product) products.push(product);
@@ -158,6 +190,10 @@ async function extractCatalog(token, pages) {
         if (title && content) info.push({ title, content, url: page.url ?? null });
       }
     }
+  }
+
+  if (windows > 0 && failed === windows) {
+    throw new Error('Could not read any products or information from this source. Try a clearer PDF or a different page.');
   }
 
   return { products: dedupeProducts(products), info };

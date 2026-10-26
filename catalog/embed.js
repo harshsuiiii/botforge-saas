@@ -15,13 +15,14 @@ const EMBED_BATCH     = 100;
 /**
  * @param {string}   token
  * @param {string[]} texts
+ * @param {{ projectId?: string|null }} opts – the bot's OpenAI project, if any
  * @returns {Promise<number[][]>} one vector per text, in input order
  */
-async function embedTexts(token, texts) {
+async function embedTexts(token, texts, opts = {}) {
   const vectors = [];
   for (let i = 0; i < texts.length; i += EMBED_BATCH) {
     const batch = texts.slice(i, i + EMBED_BATCH);
-    const data  = await openaiJson(token, '/embeddings', { model: EMBEDDING_MODEL, input: batch });
+    const data  = await openaiJson(token, '/embeddings', { model: EMBEDDING_MODEL, input: batch }, opts);
     const ordered = [...data.data].sort((a, b) => a.index - b.index);
     for (const item of ordered) vectors.push(item.embedding);
   }

@@ -106,9 +106,12 @@ function toCard(row) {
  * @param {string} botId
  * @param {string} token – owner's OpenAI key (for the query embedding)
  * @param {{ name: string, arguments: string }} call
+ * @param {{ projectId?: string|null }} opts – bills the query embedding to the bot's OpenAI project
  * @returns {Promise<{ content: string, cards: object[], searched: boolean, resultCount: number }>}
+ *   searched is false when the search itself failed, so an outage is not
+ *   mistaken for "the catalog has nothing".
  */
-async function runToolCall(botId, token, { name, arguments: argsJson }) {
+async function runToolCall(botId, token, { name, arguments: argsJson }, opts = {}) {
   let args;
   try {
     args = JSON.parse(argsJson || '{}');
@@ -123,7 +126,7 @@ async function runToolCall(botId, token, { name, arguments: argsJson }) {
   if (!filters.query) return INVALID();
 
   try {
-    const [embedding] = await embedTexts(token, [filters.query]);
+    const [embedding] = await embedTexts(token, [filters.query], opts);
 
     if (name === 'search_products') {
       const rows = await searchProducts(botId, filters, embedding);
@@ -157,7 +160,7 @@ async function runToolCall(botId, token, { name, arguments: argsJson }) {
     return {
       content    : JSON.stringify({ error: 'search unavailable' }),
       cards      : [],
-      searched   : true,
+      searched   : false,
       resultCount: 0,
     };
   }

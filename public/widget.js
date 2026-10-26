@@ -252,6 +252,7 @@
       gap: 8px;
       align-items: flex-end;
       max-width: 100%;
+      flex-shrink: 0;   /* rows keep their height once the list overflows and scrolls */
     }
     .bf-msg.bf-user { flex-direction: row-reverse; }
 
@@ -469,6 +470,7 @@
       gap: 8px;
       overflow-x: auto;
       padding: 2px 0 4px 32px;
+      flex-shrink: 0;   /* overflow-x makes min-height 0, so without this the row collapses */
     }
     .bf-cards::-webkit-scrollbar { height: 4px; }
     .bf-cards::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }

@@ -259,3 +259,93 @@ test('an OpenAI failure after streaming starts ends the stream cleanly', async (
   assert.ok(deltas(events).includes('Sorry, something went wrong.'));
   assert.equal(events.at(-1), '[DONE]');
 });
+
+// ── Review follow-ups ─────────────────────────────────────────────────────────
+
+const toolChunk = (part) => JSON.stringify({ choices: [{ index: 0, delta: { tool_calls: [part] }, finish_reason: null }] });
+
+test('reassembles a stream cut mid-line and inside multi-byte characters', async () => {
+  const { embedKey } = await seedBot(pool);
+  const text = 'Rain jacket ₹2,999 — रेन जैकेट उपलब्ध है ✓';
+  stub.queueChat({ sse: [...sse.text(text, 6), sse.finish()], chunkBytes: 5 });
+
+  const events = await chat(embedKey, 'jacket?');
+
+  assert.equal(deltas(events), text);
+  assert.equal(events.at(-1), '[DONE]');
+});
+
+test('runs two interleaved tool calls from one round', async () => {
+  const { embedKey } = await seedCatalogBot();
+  stub.queueChat({
+    sse: [
+      toolChunk({ index: 0, id: 'call_a', type: 'function', function: { name: 'search_products', arguments: '{"query":"rain' } }),
+      toolChunk({ index: 1, id: 'call_b', type: 'function', function: { name: 'search_info', arguments: '{"query":"ret' } }),
+      toolChunk({ index: 0, function: { arguments: ' jacket"}' } }),
+      toolChunk({ index: 1, function: { arguments: 'urns"}' } }),
+      sse.finish('tool_calls'),
+    ],
+  });
+  stub.queueChat({ sse: [...sse.text('Done.'), sse.finish()] });
+
+  await chat(embedKey, 'rain jacket and returns?');
+
+  const second = chatRequests()[1].body.messages;
+  const assistant = second.find((m) => m.role === 'assistant' && m.tool_calls);
+  assert.deepEqual(
+    assistant.tool_calls.map((c) => [c.id, c.function.name, c.function.arguments]),
+    [['call_a', 'search_products', '{"query":"rain jacket"}'], ['call_b', 'search_info', '{"query":"returns"}']],
+  );
+  assert.deepEqual(second.filter((m) => m.role === 'tool').map((m) => m.tool_call_id), ['call_a', 'call_b']);
+});
+
+test('stops after two tool rounds even if the model keeps calling tools', async () => {
+  const { embedKey } = await seedCatalogBot();
+  for (let i = 1; i <= 3; i++) {
+    stub.queueChat({ sse: sse.toolCall(0, `call_${i}`, 'search_products', '{"query":"jacket"}') });
+  }
+
+  const events = await chat(embedKey, 'jackets?');
+
+  assert.equal(chatRequests().length, 3);
+  assert.ok(!deltas(events).includes('went wrong'));
+  assert.equal(events.at(-1), '[DONE]');
+});
+
+test('a search outage is not logged as an unanswered question', async () => {
+  const { embedKey, botId } = await seedCatalogBot();
+  stub.failEmbeddings(true);
+  stub.queueChat({ sse: sse.toolCall(0, 'call_1', 'search_products', '{"query":"jacket"}') });
+  stub.queueChat({ sse: [...sse.text('Search is down, sorry.'), sse.finish()] });
+
+  await chat(embedKey, 'jackets?');
+  await new Promise((r) => setTimeout(r, 300));
+
+  const { rows } = await pool.query('SELECT 1 FROM unanswered_questions WHERE bot_id = $1', [botId]);
+  assert.equal(rows.length, 0);
+});
+
+test('merges duplicate product cards from two sources', async () => {
+  const { embedKey } = await seedCatalogBot();
+  const bot = (await pool.query('SELECT bot_id FROM embed_configs WHERE embed_key = $1', [embedKey])).rows[0];
+  await seedCatalog(pool, bot.bot_id, [CATALOG[0]]); // same jacket again, second source
+  stub.queueChat({ sse: sse.toolCall(0, 'call_1', 'search_products', '{"query":"waterproof rain jacket"}') });
+  stub.queueChat({ sse: [...sse.text('Here.'), sse.finish()] });
+
+  const events = await chat(embedKey, 'rain jacket?');
+
+  const names = events.find((e) => e.products).products.map((c) => c.name);
+  assert.equal(names.filter((n) => n === 'Waterproof Rain Jacket').length, 1);
+});
+
+test("tool-query embeddings are billed to the bot's OpenAI project", async () => {
+  const bot = await seedBot(pool, { botFields: { openai_project_id: 'proj_chat' } });
+  await seedCatalog(pool, bot.botId, CATALOG);
+  stub.queueChat({ sse: sse.toolCall(0, 'call_1', 'search_products', '{"query":"jacket"}') });
+  stub.queueChat({ sse: [...sse.text('Here.'), sse.finish()] });
+
+  await chat(bot.embedKey, 'jacket?');
+
+  const embedCall = stub.requests.find((r) => r.path === '/v1/embeddings');
+  assert.equal(embedCall.headers['OpenAI-Project'], 'proj_chat');
+});

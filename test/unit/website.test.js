@@ -19,6 +19,8 @@ const ROUTES = {
   '/c': page('<p>Page C</p>'),
   '/big': page(`<p>${'x'.repeat(5000)}</p>`),
   '/many': page(Array.from({ length: 10 }, (_, i) => `<a href="/p${i}">p${i}</a>`).join('')),
+  '/paras': page('<h2>Returns</h2><p>One</p><p>Two</p><ul><li>Three</li><li>Four</li></ul>line<br>break'),
+  '/hop': page('<p>Hop</p><a href="/off">off-site redirect</a>'),
 };
 for (let i = 0; i < 10; i++) ROUTES[`/p${i}`] = page(`<p>Product ${i}</p>`);
 
@@ -51,6 +53,10 @@ test.before(async () => {
     if (url.pathname === '/bare') {
       // like shop.com → www.shop.com: same site, different hostname
       res.writeHead(301, { location: `http://localhost:${server.address().port}/home` });
+      return res.end();
+    }
+    if (url.pathname === '/off') {
+      res.writeHead(302, { location: `http://localhost:${server.address().port}/a` });
       return res.end();
     }
     if (url.pathname === '/home') {
@@ -116,10 +122,27 @@ test('skips bodies over maxBytes', async () => {
 });
 
 test('checks the guard on redirects', async () => {
-  const pages = await crawlSite(`${base}/`, { guard, fetchImpl });
+  // the start URL may change host (shop.com → www.shop.com), so its redirect reaches the guard
+  const pages = await crawlSite(`${base}/go`, { guard, fetchImpl });
   assert.ok(guardCalls.includes('http://blocked.test/'));
   assert.ok(!fetched.some((u) => u.includes('blocked.test')));
-  assert.ok(!paths(pages).includes('/go'));
+  assert.deepEqual(pages, []);
+});
+
+test('skips later pages that redirect to another host', async () => {
+  const pages = await crawlSite(`${base}/hop`, { guard, fetchImpl, maxDepth: 1 });
+  assert.deepEqual(paths(pages), ['/hop']);
+  assert.ok(!fetched.some((u) => u.includes('localhost')));
+});
+
+test('keeps paragraph breaks in page text', async () => {
+  const [pageText] = await crawlSite(`${base}/paras`, { guard, fetchImpl, maxDepth: 0 });
+  assert.equal(pageText.text, 'Returns\n\nOne\n\nTwo\n\nThree\n\nFour\n\nline\nbreak');
+});
+
+test('stops when the overall crawl time limit is reached', async () => {
+  const pages = await crawlSite(`${base}/many`, { guard, fetchImpl, maxDurationMs: 0 });
+  assert.deepEqual(pages, []);
 });
 
 test('gives up after too many redirects', async () => {
